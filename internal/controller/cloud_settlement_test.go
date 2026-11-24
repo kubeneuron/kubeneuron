@@ -130,23 +130,21 @@ func TestEarlierSuccessorSettlementWhileExecuting(t *testing.T) {
 }
 
 func TestCurrentExecutingSuccessorCannotBeSettled(t *testing.T) {
-	for _, outcome := range []string{"", types.SuccessorHandedOver} {
-		c, st, _ := walkFixture(t, false)
-		ctx := t.Context()
-		inc := &types.Incident{ID: "current", State: types.StateExecuting, Attempt: 1, RemediationSlotHeld: true}
-		inc.Successor = &types.SuccessorRecord{Outcome: outcome}
-		inc.Successor.Operation = successorOperation(inc)
-		if err := st.CreateIncident(ctx, inc); err != nil {
-			t.Fatal(err)
-		}
-		_, _, err := c.ResolveSettledCloudOperation(ctx, inc.ID, "operator", "checked pool", 0, "confirm")
-		if err == nil || err.Error() != "the current replacement is still active; check the incident again when it needs an operator" {
-			t.Fatalf("outcome %q: unexpected error %v", outcome, err)
-		}
-		got := mustIncident(t, st, inc.ID)
-		if got.State != types.StateExecuting || !got.RemediationSlotHeld || got.Successor.Outcome != outcome || len(trail(t, st, inc.ID)) != 0 {
-			t.Fatalf("refused settlement changed incident %s", inc.ID)
-		}
+	c, st, _ := walkFixture(t, false)
+	ctx := t.Context()
+	inc := &types.Incident{ID: "current", State: types.StateExecuting, Attempt: 1, RemediationSlotHeld: true}
+	inc.Successor = &types.SuccessorRecord{Outcome: ""}
+	inc.Successor.Operation = successorOperation(inc)
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := c.ResolveSettledCloudOperation(ctx, inc.ID, "operator", "checked pool", 0, "confirm")
+	if err == nil || err.Error() != "the current replacement is still active; check the incident again when it needs an operator" {
+		t.Fatalf("unexpected error %v", err)
+	}
+	got := mustIncident(t, st, inc.ID)
+	if got.State != types.StateExecuting || !got.RemediationSlotHeld || got.Successor.Outcome != "" || len(trail(t, st, inc.ID)) != 0 {
+		t.Fatalf("refused settlement changed incident %s", inc.ID)
 	}
 }
 
@@ -174,5 +172,33 @@ func TestPlanningWithEarlierHandedOverSuccessorParksIncident(t *testing.T) {
 	got, _, err := c.ResolveSettledCloudOperation(ctx, inc.ID, "operator", "checked pool", 0, "settle-parked")
 	if err != nil || got.State != types.StateResolved {
 		t.Fatalf("parked settlement: incident=%v err=%v", got, err)
+	}
+}
+
+func TestSettleCurrentSuccessorAfterDurableHandover(t *testing.T) {
+	for _, reason := range []string{"operator cleanup interrupted before quarantine", "provider needs operator", "cannot confirm successor identity during cleanup", "the node it was to replace is gone, so the successor is kept"} {
+		t.Run(reason, func(t *testing.T) {
+			c, st, _ := walkFixture(t, false)
+			ctx := t.Context()
+			inc := &types.Incident{ID: "interrupted", State: types.StateExecuting, Attempt: 1, RemediationSlotHeld: true, Successor: &types.SuccessorRecord{}}
+			inc.Successor.Operation = successorOperation(inc)
+			if err := st.CreateIncident(ctx, inc); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.endSuccessor(ctx, inc, types.SuccessorHandedOver, reason); err != nil {
+				t.Fatal(err)
+			}
+			saved := mustIncident(t, st, inc.ID)
+			if saved.State != types.StateExecuting || saved.Successor.Outcome != types.SuccessorHandedOver {
+				t.Fatalf("unexpected persisted handover: %+v", saved)
+			}
+			got, _, err := c.ResolveSettledCloudOperation(ctx, inc.ID, "alice", "checked pool", 0, "settled")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.State != types.StateResolved || got.RemediationSlotHeld || got.Successor.Outcome != "settled-by-operator" {
+				t.Fatalf("unexpected settlement: %+v", got)
+			}
+		})
 	}
 }

@@ -73,16 +73,31 @@ func (c *Controller) ResolveSettledCloudOperation(ctx context.Context, id, actor
 		}
 		now := time.Now()
 		from := inc.State
-		if s := inc.Successor; s != nil && !from.Halted() && (s.Open() || s.Outcome == types.SuccessorHandedOver) {
-			if s.Outcome != types.SuccessorHandedOver || s.Operation == "" || s.Operation == successorOperation(inc) {
-				return fmt.Errorf("the current replacement is still active; check the incident again when it needs an operator")
+		s := inc.Successor
+		if !from.Halted() && s.Open() {
+			return fmt.Errorf("the current replacement is still active; check the incident again when it needs an operator")
+		}
+		if !from.Halted() && s != nil && s.Outcome == types.SuccessorHandedOver {
+			if s.Operation == "" {
+				return fmt.Errorf("cannot identify the attempt that handed over the replacement")
 			}
-			s.Outcome, s.Reason, s.EndedAt = "settled-by-operator", reason, &now
-			inc.UpdatedAt = now
-			if err := tx.UpdateIncident(ctx, inc); err != nil {
+			if s.Operation != successorOperation(inc) {
+				s.Outcome, s.Reason, s.EndedAt = "settled-by-operator", reason, &now
+				inc.UpdatedAt = now
+				if err := tx.UpdateIncident(ctx, inc); err != nil {
+					return err
+				}
+				return tx.AppendAudit(ctx, &types.AuditEntry{IncidentID: id, Time: now, FromState: from, ToState: from, Actor: actor, Action: "earlier-successor-settled", Result: reason, Params: map[string]string{"operation": s.Operation}})
+			}
+			// A restart may leave the handover durable before quarantine. Record
+			// that transition and the operator's resolution in one transaction.
+			if err := playbook.Transition(inc, types.StateNeedsHuman); err != nil {
 				return err
 			}
-			return tx.AppendAudit(ctx, &types.AuditEntry{IncidentID: id, Time: now, FromState: from, ToState: from, Actor: actor, Action: "earlier-successor-settled", Result: reason, Params: map[string]string{"operation": s.Operation}})
+			if err := tx.AppendAudit(ctx, &types.AuditEntry{IncidentID: id, Time: now, FromState: from, ToState: inc.State, Actor: "system", Action: "successor-handover-confirmed", Params: map[string]string{"operation": s.Operation}}); err != nil {
+				return err
+			}
+			from = inc.State
 		}
 		if err := settleCloudOperation(inc, reason, now); err != nil {
 			return err
