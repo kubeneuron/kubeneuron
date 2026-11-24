@@ -4,6 +4,7 @@ package operator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -26,6 +27,36 @@ import (
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
 	"github.com/kubeneuron/kubeneuron/internal/config"
 )
+
+// The lightweight docs job reads these rendered names and pod labels without
+// compiling the operator. Keep its fixture in sync with the real builders.
+func TestKubectlDocsWorkloads(t *testing.T) {
+	installation := testKubeNeuron()
+	installation.Name = "kubeneuron"
+	snapshot := &Snapshot{Digest: "docs"}
+	controller, err := controllerDeployment(installation, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grafana := grafanaDeployment(installation, "grafana", snapshot.Digest)
+	agent := agentDaemonSet(installation, snapshot)
+	workloads := map[string]any{
+		"installation": installation.Name,
+		"deployments":  []string{controller.Name, grafana.Name},
+		"pod_labels":   []map[string]string{controller.Spec.Template.Labels, grafana.Spec.Template.Labels, agent.Spec.Template.Labels},
+	}
+	got, err := json.MarshalIndent(workloads, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.ReadFile("testdata/kubectl-docs.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(want)) != string(got) {
+		t.Fatalf("update testdata/kubectl-docs.json with rendered workloads:\n%s", got)
+	}
+}
 
 func TestControllerRBACTargetsManagedServiceAccount(t *testing.T) {
 	installation := testKubeNeuron()

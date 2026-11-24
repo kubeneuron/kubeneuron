@@ -62,7 +62,7 @@ while IFS= read -r pattern; do
 done < hack/stale-claims.txt
 
 # Check kubectl examples against the installed workloads.
-if ! python3 hack/verify-kubectl-docs.py; then
+if ! python3 hack/verify-kubectl-docs.py || ! bash hack/test-verify-kubectl-docs.sh; then
     fail=1
 fi
 

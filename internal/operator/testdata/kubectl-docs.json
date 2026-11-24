@@ -1,0 +1,28 @@
+{
+  "deployments": [
+    "kubeneuron-controller",
+    "kubeneuron-grafana"
+  ],
+  "installation": "kubeneuron",
+  "pod_labels": [
+    {
+      "app.kubernetes.io/component": "controller",
+      "app.kubernetes.io/instance": "kubeneuron",
+      "app.kubernetes.io/managed-by": "kubeneuron-operator",
+      "app.kubernetes.io/name": "kube-neuron"
+    },
+    {
+      "app.kubernetes.io/component": "grafana",
+      "app.kubernetes.io/instance": "kubeneuron",
+      "app.kubernetes.io/managed-by": "kubeneuron-operator",
+      "app.kubernetes.io/name": "kube-neuron"
+    },
+    {
+      "app.kubernetes.io/component": "agent",
+      "app.kubernetes.io/instance": "kubeneuron",
+      "app.kubernetes.io/managed-by": "kubeneuron-operator",
+      "app.kubernetes.io/name": "kube-neuron",
+      "kubeneuron.io/agent": "true"
+    }
+  ]
+}
