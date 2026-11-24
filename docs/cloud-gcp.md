@@ -173,11 +173,13 @@ After an hour the incident needs an operator. A plan that stopped before the del
 made again. If the pool changed in a way KubeNeuron cannot set back safely
 (its zones now differ in size, it was put under the autoscaler, its zones
 changed), or the plan has not finished within an hour, also while nothing fails, the plan ends as
-needs-operator, nothing more is changed, and the incident's audit trail
-records the reason with the command that sets the size back, for example:
+needs-operator. The audit trail explains what to check. If the pool no longer
+exists, check the cluster. If the original machine cannot be identified,
+check the machine and the size of the pool. Restore the planned size if the
+pool is one node short. After checking the outcome, record what you found:
 
 ```sh
-gcloud container clusters resize <cluster> --node-pool <pool> --num-nodes <count> --location <location> --project <project>
+kubeneuronctl resolve <id> --cloud-operation-settled --reason "<what you found>"
 ```
 
 ### GKE node auto-repair and host maintenance

@@ -385,6 +385,37 @@ func TestRemoveFirstDeadlineWithoutProgress(t *testing.T) {
 	}
 }
 
+func TestRemoveFirstDeadlineWithoutEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		phase   cloud.RemoveFirstPhase
+		message string
+	}{
+		{cloud.RemoveFirstDeleting, "Replacement of node n3 in pool gpu started more than an hour ago, and KubeNeuron could not confirm that the machine was removed."},
+		{cloud.RemoveFirstResizing, "Node n3 was removed from pool gpu, and after more than an hour KubeNeuron could not confirm that the pool size was set back."},
+	} {
+		t.Run(string(tc.phase), func(t *testing.T) {
+			p := newPlannedPlatform()
+			c, st := plannedFixture(t, p)
+			c.platform = p.successorPlatform // No pool-size observer.
+			now := time.Now()
+			inc := &types.Incident{ID: "rf-overdue", Target: types.Target{Node: "n3"}, Class: types.ClassFellOffBus, State: types.StateExecuting,
+				OpenedAt: now, UpdatedAt: now, StateChangedAt: now,
+				RemoveFirst: &types.RemoveFirstRecord{RemoveFirstPlan: cloud.RemoveFirstPlan{Operation: "rf-overdue-a1", Instance: "i-3", Pool: "gpu", Phase: tc.phase, PlannedAt: now.Add(-2 * time.Hour)}}}
+			if err := st.CreateIncident(t.Context(), inc); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.removeFirstOverdue(t.Context(), inc, inc.RemoveFirst); err != nil {
+				t.Fatal(err)
+			}
+			want := tc.message + ` Check the machine and the size of the pool, then run kubeneuronctl resolve rf-overdue --cloud-operation-settled --reason "<what you found>"`
+			got := mustIncident(t, st, inc.ID)
+			if got.State != types.StateNeedsHuman || got.RemoveFirst.Reason != want {
+				t.Fatalf("state %s, reason %q", got.State, got.RemoveFirst.Reason)
+			}
+		})
+	}
+}
+
 // An open plan the reconcile pass cannot continue, for want of the pinned
 // identity, is left for an operator, not skipped for good.
 func TestRemoveFirstSweepWithoutIdentity(t *testing.T) {
