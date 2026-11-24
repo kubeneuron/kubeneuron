@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -107,6 +108,25 @@ func readPassword(cmd *cobra.Command) ([]byte, error) {
 	return []byte(strings.TrimRight(string(raw), "\r\n")), nil
 }
 
+// releaseTag is the form of a published release tag. Only a controller
+// version of this form goes into the release link, so the controller's answer
+// cannot choose the URL the CLI prints.
+var releaseTag = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$`)
+
+// versionDiffersLine says when this CLI and the controller report different
+// versions. It compares only what the controller returned; a development
+// build of the CLI, or a controller that reports no version, says nothing.
+func versionDiffersLine(cli, controller string, reported bool) string {
+	if !reported || cli == "" || cli == "dev" || cli == controller {
+		return ""
+	}
+	line := fmt.Sprintf("This kubeneuronctl is %s, the controller is %s. Commands and their output can differ between versions", cli, controller)
+	if releaseTag.MatchString(controller) {
+		line += ". Use the kubeneuronctl of the controller's version: https://github.com/kubeneuron/kubeneuron/releases/tag/" + controller
+	}
+	return line
+}
+
 func cmdStatus() *cobra.Command {
 	return &cobra.Command{Use: "status", Short: "Fleet health summary", RunE: func(cmd *cobra.Command, _ []string) error {
 		c, err := newClient(cmd)
@@ -116,14 +136,17 @@ func cmdStatus() *cobra.Command {
 		var build struct {
 			Version string `json:"version"`
 		}
+		reported := true
 		if err := c.do("GET", "/api/v1/version", nil, &build); err != nil {
 			var response *responseError
 			if !errors.As(err, &response) || response.code != http.StatusNotFound {
 				return err
 			}
 			build.Version = "version not reported (this controller is from a release that does not report it)"
+			reported = false
 		} else if build.Version == "" {
 			build.Version = "version not reported"
+			reported = false
 		}
 		var incidents []*types.Incident
 		if err := c.do("GET", "/api/v1/incidents", nil, &incidents); err != nil {
@@ -141,6 +164,9 @@ func cmdStatus() *cobra.Command {
 		}
 		out := cmd.OutOrStdout()
 		_, _ = fmt.Fprintln(out, "controller:", build.Version)
+		if line := versionDiffersLine(version, build.Version, reported); line != "" {
+			_, _ = fmt.Fprintln(out, line)
+		}
 		_, _ = fmt.Fprintf(out, "automation paused: %v\n", pause.Paused)
 		if line := unloadedConfigLine(c, time.Now()); line != "" {
 			_, _ = fmt.Fprintln(out, line)

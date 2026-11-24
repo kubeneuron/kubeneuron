@@ -33,6 +33,8 @@ API is `v1alpha1`.
 
 ### Changed
 
+- `kubeneuronctl status` says when the CLI and the controller are different versions and links to the release of the controller's version. It compares only what the controller returned; the CLI contacts nothing else.
+
 - Panel: when an Approve or Reject arrives after the approval round was already decided, the panel now shows the recorded decision, who made it, through which channel and when, and offers to refresh the incident. The API answer for this case carries the decision in new `X-Approval-Actor`, `X-Approval-Channel` and `X-Approval-Decided-At` headers next to `X-Approval-Conflict` and `X-Approval-Decision`.
 
 - kubeneuronctl connection, authentication and TLS errors now say what to do next and print the underlying error on a separate cause: line. If you parse these error texts, update your parser.

@@ -472,3 +472,95 @@ func TestIncidentShowHistoricalHandover(t *testing.T) {
 		t.Fatalf("show: %v\n%s", err, out)
 	}
 }
+
+func TestVersionDiffersLine(t *testing.T) {
+	for _, tc := range []struct {
+		cli, controller string
+		reported        bool
+		want            string
+	}{
+		{"v1.0.0-rc.2", "v1.0.0-rc.2", true, ""},
+		{"v1.0.0-rc.2", "v1.0.0-rc.1", true, "This kubeneuronctl is v1.0.0-rc.2, the controller is v1.0.0-rc.1. Commands and their output can differ between versions. Use the kubeneuronctl of the controller's version: https://github.com/kubeneuron/kubeneuron/releases/tag/v1.0.0-rc.1"},
+		{"v1.0.0", "v1.0.0-rc.2-4-gabc1234", true, "This kubeneuronctl is v1.0.0, the controller is v1.0.0-rc.2-4-gabc1234. Commands and their output can differ between versions"},
+		{"v1.0.0", "v1.0.0/../../evil", true, "This kubeneuronctl is v1.0.0, the controller is v1.0.0/../../evil. Commands and their output can differ between versions"},
+		{"v1.0.0", "version not reported", false, ""},
+		{"dev", "v1.0.0", true, ""},
+		{"", "v1.0.0", true, ""},
+	} {
+		if got := versionDiffersLine(tc.cli, tc.controller, tc.reported); got != tc.want {
+			t.Errorf("%s vs %s: %q, want %q", tc.cli, tc.controller, got, tc.want)
+		}
+	}
+}
+
+// hostRecorder records the host of every request the CLI makes through the
+// default transport.
+type hostRecorder struct {
+	next  http.RoundTripper
+	hosts []string
+}
+
+func (h *hostRecorder) RoundTrip(r *http.Request) (*http.Response, error) {
+	h.hosts = append(h.hosts, r.URL.Host)
+	return h.next.RoundTrip(r)
+}
+
+// status prints the version line after the controller's version, keeps the
+// rest of its output, and asks nothing of any host but --server.
+func TestStatusSaysWhenVersionsDiffer(t *testing.T) {
+	for _, tc := range []struct {
+		name, cli, body string
+		code            int
+		line            bool
+	}{
+		{"differ", "v1.0.0-rc.2", `{"version":"v1.0.0-rc.1"}`, 200, true},
+		{"equal", "v1.0.0-rc.1", `{"version":"v1.0.0-rc.1"}`, 200, false},
+		{"no version endpoint", "v1.0.0-rc.2", "", 404, false},
+		{"dev build", "dev", `{"version":"v1.0.0-rc.1"}`, 200, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v1/version":
+					if tc.code != 200 {
+						http.NotFound(w, r)
+						return
+					}
+					_, _ = io.WriteString(w, tc.body)
+				case "/api/v1/incidents":
+					_, _ = io.WriteString(w, "[]")
+				case "/api/v1/pause":
+					_, _ = io.WriteString(w, `{"paused":false}`)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			recorder := &hostRecorder{next: http.DefaultTransport}
+			http.DefaultTransport = recorder
+			defer func() { http.DefaultTransport = recorder.next }()
+			saved := version
+			version = tc.cli
+			defer func() { version = saved }()
+
+			out, err := runCommand(t, server.URL, "status")
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := strings.Split(out, "\n")
+			differs := strings.HasPrefix(lines[1], "This kubeneuronctl is ")
+			if differs != tc.line || !strings.HasPrefix(lines[0], "controller: ") || !strings.Contains(out, "automation paused: false\nincidents: 0 total\n") {
+				t.Fatalf("status:\n%s", out)
+			}
+			host := strings.TrimPrefix(server.URL, "http://")
+			for _, h := range recorder.hosts {
+				if h != host {
+					t.Fatalf("status contacted %s; only %s is the server", h, host)
+				}
+			}
+			if len(recorder.hosts) == 0 {
+				t.Fatal("no request went through the recorded transport")
+			}
+		})
+	}
+}
