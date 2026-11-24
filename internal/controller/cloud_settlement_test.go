@@ -175,6 +175,26 @@ func TestPlanningWithEarlierHandedOverSuccessorParksIncident(t *testing.T) {
 	}
 }
 
+func TestPlanningWithOlderBusySuccessorCheckUsesUnconfirmedHandover(t *testing.T) {
+	c, st, _ := walkFixture(t, false)
+	ctx := t.Context()
+	inc := &types.Incident{ID: "older-check", Target: types.Target{Node: "n1"}, State: types.StateExecuting, Attempt: 2}
+	inc.Successor = &types.SuccessorRecord{Outcome: types.SuccessorHandedOver,
+		Reason: "Replacement node worker is busy. Check the workload first. Then run " + settlementCommand(inc.ID)}
+	inc.Successor.Operation = "older-check-a1"
+	inc.Successor.Pool = "train"
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	want := unconfirmedSuccessorHandover("n1", "train", inc.ID).message()
+	if err := c.planSuccessor(ctx, inc); err == nil || err.Error() != want {
+		t.Fatalf("planning returned %v, want %q", err, want)
+	}
+	if !auditHas(trail(t, st, inc.ID), "quarantine", want) {
+		t.Fatal("missing fallback guidance in quarantine audit")
+	}
+}
+
 func TestSettleCurrentSuccessorAfterDurableHandover(t *testing.T) {
 	for _, reason := range []string{"operator cleanup interrupted before quarantine", "provider needs operator", "cannot confirm successor identity during cleanup", "the node it was to replace is gone, so the successor is kept"} {
 		t.Run(reason, func(t *testing.T) {
