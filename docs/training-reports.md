@@ -24,7 +24,7 @@ volumes:
                 path: ca.crt
 ```
 
-Mount it read-only at `/var/run/training-report` in the worker container. Set `TRAINING_REPORT_HOST` to the controller Service DNS name, for example `fleet-controller.kube-neuron-system.svc` for an installation named `fleet` in that runtime namespace. The worker needs a verified job owner, an accelerator allocation and a monitored node. The controller checks its pod-bound token using Kubernetes TokenReview. The worker service account needs no permission to edit the job or incident.
+Mount it read-only at `/var/run/training-report` in the worker container. Set `TRAINING_REPORT_HOST` to the controller Service DNS name, for example `fleet-controller.kube-neuron.svc` for an installation named `fleet` in the default runtime namespace, `kube-neuron`. Substitute your installation name and runtime namespace if they differ. The worker needs a verified job owner, an accelerator allocation and a monitored node. The controller checks its pod-bound token using Kubernetes TokenReview. The worker service account needs no permission to edit the job or incident.
 
 ## Send a report from Python
 
