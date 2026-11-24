@@ -1299,9 +1299,24 @@ func (p *Platform) ForgetUnknownCordon(ctx context.Context, node, owner string) 
 	return nil
 }
 
+type janitorSnapshotKey struct{}
+
+// WithJanitorNodeSnapshot pins one read-only listing for the two node janitors.
+// Mutation methods still fetch the live object before changing it.
+func (p *Platform) WithJanitorNodeSnapshot(ctx context.Context) (context.Context, error) {
+	nodes, err := p.listNodesForJanitor(ctx)
+	if err != nil {
+		return ctx, err
+	}
+	return context.WithValue(ctx, janitorSnapshotKey{}, nodes), nil
+}
+
 // listNodesForJanitor serves the informer cache once synced and falls back to
 // a live List, like CordonedNodes. Every write it leads to re-reads live.
 func (p *Platform) listNodesForJanitor(ctx context.Context) ([]*corev1.Node, error) {
+	if nodes, ok := ctx.Value(janitorSnapshotKey{}).([]*corev1.Node); ok {
+		return nodes, nil
+	}
 	if lp := p.nodeLister.Load(); lp != nil {
 		if cached, err := (*lp).List(labels.Everything()); err == nil {
 			return cached, nil
@@ -1474,26 +1489,11 @@ func decodeCordonOwners(raw string) ([]string, error) {
 // The record lives on the node, so it survives a controller that dies between
 // cordoning a node and finishing the playbook that cordoned it.
 func (p *Platform) CordonedNodes(ctx context.Context) ([]platform.CordonedNode, error) {
-	// Serve from the informer cache once synced: this runs on every reconcile
-	// tick, and a live List per tick is exactly the apiserver load the node
-	// cache exists to remove. The janitor tolerates the cache's staleness — a
-	// cordon it misses this tick it sees the next, and Uncordon itself is a
-	// live patch.
-	if lp := p.nodeLister.Load(); lp != nil {
-		cached, err := (*lp).List(labels.Everything())
-		if err == nil {
-			return collectCordonedNodes(cached), nil
-		}
-	}
-	nodes, err := p.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	nodes, err := p.listNodesForJanitor(ctx)
 	if err != nil {
 		return nil, err
 	}
-	live := make([]*corev1.Node, len(nodes.Items))
-	for i := range nodes.Items {
-		live[i] = &nodes.Items[i]
-	}
-	return collectCordonedNodes(live), nil
+	return collectCordonedNodes(nodes), nil
 }
 
 // collectCordonedNodes renders one whole listing, and publishes how much of the

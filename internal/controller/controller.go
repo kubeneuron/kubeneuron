@@ -438,6 +438,29 @@ func (c *Controller) Run(ctx context.Context) error {
 	}
 }
 
+func (c *Controller) reconcileNodeHolds(ctx context.Context) (bool, bool) {
+	if snapshots, ok := c.platform.(interface {
+		WithJanitorNodeSnapshot(context.Context) (context.Context, error)
+	}); ok {
+		snapshot, err := snapshots.WithJanitorNodeSnapshot(ctx)
+		if err != nil {
+			c.log.Warn("listing nodes for cordon and taint reconciliation failed", "err", err)
+			return false, false
+		}
+		ctx = snapshot
+	}
+	var recorded map[string][]string
+	if snapshot, ok := c.platform.(interface {
+		SnapshotDegradedOwners(context.Context) map[string][]string
+	}); ok {
+		recorded = snapshot.SnapshotDegradedOwners(ctx)
+	}
+	if !c.reconcileCordonedNodes(ctx) {
+		return false, false
+	}
+	return true, c.reconcileTaintSnapshot(ctx, recorded)
+}
+
 // runJanitors drives the background reconcilers until ctx ends: monitoring
 // that a playbook switched off must come back even when the playbook never
 // reaches its restore step, a node a playbook cordoned must not stay out of
@@ -456,8 +479,7 @@ func (c *Controller) runJanitors(ctx context.Context) {
 		c.syncAcceleratorInventory(passCtx)
 		c.pollNodeHealth(passCtx)
 		c.restoreAbandonedAcceleratorStacks(passCtx)
-		cordonsSeen := c.reconcileCordonedNodes(passCtx)
-		taintsSeen := c.reconcileDegradedTaints(passCtx)
+		cordonsSeen, taintsSeen := c.reconcileNodeHolds(passCtx)
 		c.reconcileJournalLabels(passCtx)
 		c.resolveIncidentsOnVanishedNodes(passCtx)
 		c.pollInterruptions(passCtx)

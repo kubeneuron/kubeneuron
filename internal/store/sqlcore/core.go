@@ -682,6 +682,15 @@ func (q *Queries) PromoteIncidentTarget(ctx context.Context, inc *types.Incident
 func (q *Queries) ListIncidents(ctx context.Context, f store.IncidentFilter) ([]*types.Incident, error) {
 	qs := incidentSelect + ` WHERE 1=1`
 	var args []any
+	if f.IDs != nil {
+		if len(f.IDs) == 0 {
+			return nil, nil
+		}
+		qs += " AND id IN (?" + repeat(",?", len(f.IDs)-1) + ")"
+		for _, id := range f.IDs {
+			args = append(args, id)
+		}
+	}
 	if len(f.States) > 0 {
 		qs += ` AND state IN (?` + repeat(",?", len(f.States)-1) + `)`
 		for _, st := range f.States {

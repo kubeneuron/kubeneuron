@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 
@@ -76,12 +77,32 @@ func (c *Controller) reconcileCordonedNodes(ctx context.Context) bool {
 	if !ok {
 		return true
 	}
-	c.clearUnknownCordonsReleasedByHand(ctx)
 	nodes, err := janitor.CordonedNodes(ctx)
 	if err != nil {
 		c.log.Warn("listing cordoned nodes failed, will retry", "err", err)
 		return false
 	}
+	var ids []string
+	for _, node := range nodes {
+		for _, owner := range node.Holds() {
+			if id, ok := incidentFromCordonOwner(owner); ok {
+				ids = append(ids, id)
+			}
+		}
+	}
+	slices.Sort(ids)
+	active := make(map[string]bool)
+	for batch := range slices.Chunk(slices.Compact(ids), 256) {
+		rows, err := c.store.ListIncidents(ctx, store.IncidentFilter{IDs: batch})
+		if err != nil {
+			c.log.Warn("reading node hold owners failed, keeping holds", "err", err)
+			return false
+		}
+		for _, inc := range rows {
+			active[inc.ID] = isActiveIncidentState(inc.State)
+		}
+	}
+	c.clearUnknownCordonsReleasedByHand(ctx)
 	for _, node := range nodes {
 		// Every remediation holding this node, not just the one whose reason is
 		// on it. On a multi-GPU node two incidents can hold one cordon, and the
@@ -94,7 +115,9 @@ func (c *Controller) reconcileCordonedNodes(ctx context.Context) bool {
 		// unfolding that rule here keeps this loop, the held-mark verdict and the
 		// release path agreeing about the same node.
 		for _, owner := range node.Holds() {
-			c.reconcileCordonOwner(ctx, janitor, node, owner)
+			if id, _ := incidentFromCordonOwner(owner); !active[id] {
+				c.reconcileCordonOwner(ctx, janitor, node, owner)
+			}
 		}
 	}
 	return true

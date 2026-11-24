@@ -4,6 +4,7 @@ package controller
 
 import (
 	"context"
+	"slices"
 	"strings"
 
 	"github.com/kubeneuron/kubeneuron/internal/platform"
@@ -190,6 +191,10 @@ func (c *Controller) syncDegradedTaint(ctx context.Context, inc *types.Incident,
 // It reports false when it could not list the marks or read the open
 // incidents, so store retention does not take that pass as having seen them.
 func (c *Controller) reconcileDegradedTaints(ctx context.Context) bool {
+	return c.reconcileTaintSnapshot(ctx, nil)
+}
+
+func (c *Controller) reconcileTaintSnapshot(ctx context.Context, recorded map[string][]string) bool {
 	tainter := c.nodeTainter()
 	if tainter == nil {
 		return true
@@ -225,7 +230,17 @@ func (c *Controller) reconcileDegradedTaints(ctx context.Context) bool {
 	isMarked := make(map[string]bool, len(marked))
 	for _, node := range marked {
 		isMarked[node] = true
-		if _, stillOpen := open[node]; stillOpen {
+		if incidents, stillOpen := open[node]; stillOpen {
+			if owners, ok := recorded[node]; ok {
+				ids := make([]string, 0, len(incidents))
+				for _, inc := range incidents {
+					ids = append(ids, inc.ID)
+				}
+				slices.Sort(ids)
+				if slices.Equal(owners, ids) {
+					continue
+				}
+			}
 			c.syncTaintOwners(ctx, node)
 			continue
 		}
@@ -247,7 +262,8 @@ func (c *Controller) reconcileDegradedTaints(ctx context.Context) bool {
 		}
 		c.releaseClosedTaint(ctx, tainter, node, "no incident on it is open any more")
 	}
-	for node, inc := range open {
+	for node, incidents := range open {
+		inc := incidents[0]
 		if isMarked[node] {
 			continue
 		}
@@ -318,14 +334,14 @@ func (c *Controller) otherOpenIncidentsOnNode(ctx context.Context, inc *types.In
 
 // nodesUnderOpenIncidents maps each node with a non-halted incident to one of
 // those incidents (which one is immaterial: the value only names the mark).
-func (c *Controller) nodesUnderOpenIncidents(ctx context.Context) (map[string]*types.Incident, error) {
+func (c *Controller) nodesUnderOpenIncidents(ctx context.Context) (map[string][]*types.Incident, error) {
 	incidents, err := c.store.ListIncidents(ctx, store.IncidentFilter{
 		States: activeIncidentStates(),
 	})
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[string]*types.Incident, len(incidents))
+	out := make(map[string][]*types.Incident, len(incidents))
 	for _, inc := range incidents {
 		if inc.Target.Node == "" {
 			continue
@@ -349,9 +365,7 @@ func (c *Controller) nodesUnderOpenIncidents(ctx context.Context) (map[string]*t
 		if inc.DryRun {
 			continue
 		}
-		if _, seen := out[inc.Target.Node]; !seen {
-			out[inc.Target.Node] = inc
-		}
+		out[inc.Target.Node] = append(out[inc.Target.Node], inc)
 	}
 	return out, nil
 }

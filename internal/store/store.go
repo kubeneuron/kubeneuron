@@ -57,6 +57,8 @@ var (
 
 // IncidentFilter narrows ListIncidents.
 type IncidentFilter struct {
+	// IDs restricts results to these incidents. A nil slice leaves IDs unrestricted.
+	IDs    []string
 	States []types.IncidentState
 	Node   string
 	Limit  int

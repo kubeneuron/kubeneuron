@@ -1155,3 +1155,37 @@ func TestReleaseVanishedRepairNodeKeepsReplacementUID(t *testing.T) {
 		}
 	}
 }
+
+func TestListIncidentsByOwnerIDs(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	ctx := context.Background()
+	for _, id := range []string{"active", "closed", "unrelated"} {
+		inc := testIncident(id, time.Now())
+		inc.Target.Node = id
+		if id == "closed" {
+			inc.State = types.StateResolved
+		}
+		if err := s.CreateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := s.ListIncidents(ctx, store.IncidentFilter{IDs: []string{"active", "closed", "missing"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	states := map[string]types.IncidentState{}
+	for _, inc := range rows {
+		states[inc.ID] = inc.State
+	}
+	if len(states) != 2 || states["active"] != types.StateOpen || states["closed"] != types.StateResolved {
+		t.Fatalf("owner states: %v", states)
+	}
+	rows, err = s.ListIncidents(ctx, store.IncidentFilter{IDs: []string{}})
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("empty owner set: %d rows, %v", len(rows), err)
+	}
+}

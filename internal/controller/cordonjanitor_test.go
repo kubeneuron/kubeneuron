@@ -1024,3 +1024,41 @@ func TestCloudRecoveryCannotResolveFromOldHeartbeat(t *testing.T) {
 		t.Fatalf("ok=%v reason=%q", ok, reason)
 	}
 }
+
+type failSecondOwnerBatch struct {
+	store.Store
+	batches int
+}
+
+func (s *failSecondOwnerBatch) ListIncidents(ctx context.Context, f store.IncidentFilter) ([]*types.Incident, error) {
+	if f.IDs != nil {
+		s.batches++
+		if s.batches == 2 {
+			return nil, errors.New("owner batch unavailable")
+		}
+	}
+	return s.Store.ListIncidents(ctx, f)
+}
+
+func TestFailedCordonOwnerBatchPreventsRelease(t *testing.T) {
+	inc := resetIncident()
+	inc.State = types.StateResolved
+	p := &janitorPlatform{cordoned: []platform.CordonedNode{{Name: "node-a", Reason: cordonReason(inc)}}}
+	c, st := stackTestController(t, p)
+	ctx := t.Context()
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	failing := &failSecondOwnerBatch{Store: c.store}
+	c.store = failing
+	for i := range 256 {
+		id := fmt.Sprintf("zz-owner-%03d", i)
+		p.cordoned = append(p.cordoned, platform.CordonedNode{Name: id, Owners: []string{id}})
+	}
+	if c.reconcileCordonedNodes(ctx) || failing.batches != 2 || len(p.uncordoned) != 0 {
+		t.Fatalf("batch failure: %d batches, released %v", failing.batches, p.uncordoned)
+	}
+}

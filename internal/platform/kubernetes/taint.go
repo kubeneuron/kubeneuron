@@ -12,7 +12,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/kubeneuron/kubeneuron/internal/platform"
@@ -139,29 +138,17 @@ func (p *Platform) rewriteTaints(ctx context.Context, node string, extra func(*c
 // harmless — a taint the cache misses this pass it sees the next, and both the
 // apply and the remove paths re-read live before writing.
 func (p *Platform) DegradedTaintedNodes(ctx context.Context) ([]string, error) {
-	if lp := p.nodeLister.Load(); lp != nil {
-		cached, err := (*lp).List(labels.Everything())
-		if err == nil {
-			out := make([]string, 0, len(cached))
-			for _, node := range cached {
-				if hasDegradedTaint(node.Spec.Taints) {
-					out = append(out, node.Name)
-				}
-			}
-			sort.Strings(out)
-			return out, nil
-		}
-	}
-	nodes, err := p.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	nodes, err := p.listNodesForJanitor(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var out []string
-	for i := range nodes.Items {
-		if hasDegradedTaint(nodes.Items[i].Spec.Taints) {
-			out = append(out, nodes.Items[i].Name)
+	for _, node := range nodes {
+		if hasDegradedTaint(node.Spec.Taints) {
+			out = append(out, node.Name)
 		}
 	}
+	sort.Strings(out)
 	return out, nil
 }
 
@@ -215,6 +202,24 @@ func (p *Platform) UpdateDegradedTaintOwners(ctx context.Context, node string, a
 	ops = append(ops, setAnnotationOp(degradedOwnersAnnotation, encodeCordonOwners(updated)))
 	_, err = p.patchAnnotations(ctx, node, ops)
 	return err
+}
+
+// SnapshotDegradedOwners returns the owners seen in the pass's node listing.
+// Missing or malformed records require the normal per-node reconciliation path.
+func (p *Platform) SnapshotDegradedOwners(ctx context.Context) map[string][]string {
+	nodes, _ := ctx.Value(janitorSnapshotKey{}).([]*corev1.Node)
+	out := make(map[string][]string)
+	for _, node := range nodes {
+		if !hasDegradedTaint(node.Spec.Taints) {
+			continue
+		}
+		owners, err := decodeCordonOwners(node.Annotations[degradedOwnersAnnotation])
+		if err == nil {
+			sort.Strings(owners)
+			out[node.Name] = owners
+		}
+	}
+	return out
 }
 
 // DegradedTaintOwners implements platform.DegradedTaintOwnership.

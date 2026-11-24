@@ -223,7 +223,7 @@ func BenchmarkControllerFleetPass(b *testing.B) {
 			c := New(s, nil, engine, nil, nil, p, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			c.SetDegradedTaintPolicy(DegradedTaintPolicy{Enabled: true})
 			runJanitors := func() {
-				if !c.reconcileCordonedNodes(ctx) || !c.reconcileDegradedTaints(ctx) {
+				if cordons, taints := c.reconcileNodeHolds(ctx); !cordons || !taints {
 					b.Fatal("janitor listing failed")
 				}
 			}

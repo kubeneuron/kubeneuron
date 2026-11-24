@@ -193,3 +193,29 @@ func TestForgetUnknownCordon(t *testing.T) {
 		t.Fatal("the mark was not forgotten, so the next pass cannot report again")
 	}
 }
+
+func TestSnapshotCleanupRechecksLiveCordon(t *testing.T) {
+	node := gpuNode("gpu-1", "8")
+	node.Annotations = map[string]string{cordonUnknownOwnersAnnotation: `["inc-1"]`, cordonOwnersAnnotation: `["inc-1"]`}
+	client := fake.NewSimpleClientset(node)
+	p := &Platform{client: client}
+	ctx, err := p.WithJanitorNodeSnapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The operator cordons the node again between the listing and cleanup.
+	live := node.DeepCopy()
+	live.Spec.Unschedulable = true
+	if _, err := client.CoreV1().Nodes().Update(ctx, live, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	client.ClearActions()
+	cleared, err := p.ClearUnknownCordonsReleasedByHand(ctx)
+	if err != nil || len(cleared) != 0 {
+		t.Fatalf("cleared %v, error %v", cleared, err)
+	}
+	actions := client.Actions()
+	if len(actions) != 1 || actions[0].GetVerb() != "get" {
+		t.Fatalf("expected a live GET before cleanup, got %v", actions)
+	}
+}
