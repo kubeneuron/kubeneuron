@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/kubeneuron/kubeneuron/internal/cloud/capacityreason"
 	"slices"
 	"strconv"
 	"strings"
@@ -14,6 +13,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 
+	"github.com/kubeneuron/kubeneuron/internal/cloud/capacityreason"
 	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
@@ -157,10 +157,11 @@ func (p *Provider) requestSuccessor(ctx context.Context, s cloud.Successor) (clo
 	}
 	name, err := p.api.SetPoolSize(ctx, pl.Name, before+1)
 	if err != nil {
+		err = fmt.Errorf("gcp: growing node pool %s for a successor: %w", pl.Name, err)
 		if failure := capacityFailure(err); failure != nil {
 			return s, failure
 		}
-		return s, fmt.Errorf("gcp: growing node pool %s for a successor: %w", pl.Name, err)
+		return s, err
 	}
 	s.Phase, s.State = cloud.SuccessorRequested, withState(s.State, stateOperation, name)
 	return s, nil

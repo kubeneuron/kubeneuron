@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"github.com/kubeneuron/kubeneuron/internal/cloud/capacityreason"
 	"maps"
 	"math"
 	"strconv"
@@ -17,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/eks"
 	et "github.com/aws/aws-sdk-go-v2/service/eks/types"
 	"github.com/aws/smithy-go"
+	"github.com/kubeneuron/kubeneuron/internal/cloud/capacityreason"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 

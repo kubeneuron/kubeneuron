@@ -6,12 +6,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/kubeneuron/kubeneuron/internal/cloud/capacityreason"
 	"maps"
 	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/kubeneuron/kubeneuron/internal/cloud/capacityreason"
 	"github.com/kubeneuron/kubeneuron/internal/cloud/removefirst"
 	"github.com/kubeneuron/kubeneuron/internal/cloud/resizediff"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
@@ -192,10 +192,11 @@ func (p *Provider) ensureSuccessor(ctx context.Context, r *replacement) error {
 		}
 		tags[replacingTag] = marker(r.machine, r.before)
 		if err := p.api.WritePool(ctx, r.pool, r.state, r.before+1, tags); err != nil {
+			err = fmt.Errorf("azure: growing agent pool %s to replace %s: %w; nothing was deleted", r.pool, r.machine, err)
 			if failure := capacityFailure(err); failure != nil {
 				return failure
 			}
-			return fmt.Errorf("azure: growing agent pool %s to replace %s: %w; nothing was deleted", r.pool, r.machine, err)
+			return err
 		}
 		r.started = true
 		var err error

@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/kubeneuron/kubeneuron/internal/cloud/capacityreason"
 	"net/http"
 	"regexp"
 	"slices"
@@ -23,6 +22,8 @@ import (
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 	"google.golang.org/grpc/codes"
+
+	"github.com/kubeneuron/kubeneuron/internal/cloud/capacityreason"
 )
 
 // cluster is what this package reads from a GKE cluster.
