@@ -309,6 +309,8 @@ kubectl -n kube-neuron get deployment kubeneuron-operator
     curl -sfL https://github.com/kubeneuron/kubeneuron/releases/download/v1.0.0-rc.2/install.sh \
       | bash -s -- --version v1.0.0-rc.2
     ```
+    Once the installation is Ready, follow the [Quickstart](quickstart.md) to connect kubeneuronctl, check the controller's status, and open a test incident.
+
     Pin a concrete version in anything repeatable: it selects the matching
     signed images and install manifest.
 

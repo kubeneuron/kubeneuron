@@ -343,9 +343,7 @@ fi
 kubectl -n kube-neuron rollout status deployment/kubeneuron-operator --timeout=180s >/dev/null
 say "generating operational secrets"
 api_token=$(kubectl -n "$NS" get secret "$NAME-operator-api-token" --ignore-not-found -o jsonpath='{.data.token}' | base64 --decode)
-api_token_kept=1
 if [[ -z $api_token ]]; then
-	api_token_kept=0
 	api_token=$(openssl rand -hex 32)
 	kubectl -n "$NS" create secret generic "$NAME-operator-api-token" \
 		--from-literal=token="$api_token" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
@@ -1152,8 +1150,7 @@ cat <<EOF
 
 $(printf '\033[1;32m✓ KubeNeuron is Ready.\033[0m')
 
-  Panel / API   kubectl -n $NS port-forward service/$NAME-controller 8080:8080
-                → http://127.0.0.1:8080
+  Panel / API   http://127.0.0.1:8080
 EOF
 if [[ -n $admin_password ]]; then
 	cat <<EOF
@@ -1165,19 +1162,7 @@ elif ((panel_users_kept)); then
   Sign in       unchanged: the $NAME-panel-users Secret was kept
 EOF
 fi
-if ((api_token_kept)); then
-	cat <<EOF
-  API token     unchanged: kept in the $NAME-operator-api-token Secret
-                (kubectl -n $NS get secret $NAME-operator-api-token -o jsonpath='{.data.token}' | base64 -d)
-EOF
-else
-	cat <<EOF
-  API token     $api_token
-EOF
-fi
-cat <<EOF
-                (automation/CLI: kubeneuronctl --server http://127.0.0.1:8080 --token ...)
-EOF
+printf '  API token     stored in the %s-operator-api-token Secret\n' "$NAME"
 execution_mode=$(kubectl get kubeneuron "$NAME" -o jsonpath='{.spec.safety.executionMode}')
 if [[ $execution_mode == DryRun ]]; then
 	echo "  Mode          DryRun — detection, workflows, approvals, audit; no node is touched."
@@ -1197,9 +1182,39 @@ EOF
 fi
 cat <<EOF
 
-  Next steps    bind real playbooks/policies (docs/playbook-authoring.md)
-                and follow docs/quickstart.md to check GPU visibility and
-                open a dry-run incident.
   TLS           issued and renewed by the operator; to bring your own,
                 follow docs/install.md §3 or deploy/cert-manager/.
 EOF
+
+release_page="https://github.com/kubeneuron/kubeneuron/releases"
+case $(uname -s) in
+ Linux) cli_os=linux; checksum='sha256sum -c' ;;
+ Darwin) cli_os=darwin; checksum='shasum -a 256 -c' ;;
+ *) cli_os='' ;;
+esac
+case $(uname -m) in
+ x86_64|amd64) cli_arch=amd64 ;;
+ arm64|aarch64) cli_arch=arm64 ;;
+ *) cli_arch='' ;;
+esac
+# Shell variables in the printed commands are expanded in the operator's terminal.
+# shellcheck disable=SC2016
+if [[ -z $cli_os || -z $cli_arch || -z $VERSION || $VERSION == latest || $REPO_SLUG != kubeneuron/kubeneuron ]]; then
+ printf '  CLI downloads: %s\n' "$release_page"
+ if [[ -n $cli_os && -n $cli_arch ]]; then printf '  Open the panel: kubectl -n %q port-forward service/%q-controller 8080:8080\n' "$NS" "$NAME"; fi
+else
+ bundle="kubeneuronctl-$VERSION-$cli_os-$cli_arch"
+ archive="$bundle.tar.gz"
+ base="$release_page/download/$VERSION"
+ echo '  In this terminal, download the CLI for the installed release and verify its checksum.'
+ printf '  cli_dir=$(mktemp -d) && (cd "$cli_dir" && curl -fsSLO %q && curl -fsSLO %q && awk -v file=%q '\''$2 == file {print; found++} END {exit found != 1}'\'' %q > cli.sha256 && %s cli.sha256 && tar -xzf %q %q && mv %q kubeneuronctl)\n' "$base/$archive" "$base/checksums-$VERSION.txt" "$archive" "checksums-$VERSION.txt" "$checksum" "$archive" "$bundle" "$bundle"
+ echo '  In a second terminal, start port forwarding to the controller and leave it running.'
+ printf '  kubectl -n %q port-forward service/%q-controller 8080:8080\n' "$NS" "$NAME"
+ echo "  Back in the first terminal, load the API token from the Kubernetes Secret and check the controller's status."
+ printf '  KUBENEURONCTL_TOKEN=$(kubectl -n %q get secret %q -o jsonpath='\''{.data.token}'\'' | base64 -d) && export KUBENEURONCTL_TOKEN && "$cli_dir/kubeneuronctl" --server http://127.0.0.1:8080 status\n' "$NS" "$NAME-operator-api-token"
+ if [[ $execution_mode == DryRun ]]; then
+  echo '  In the first terminal, open a DryRun incident for the fictitious node quickstart-demo.'
+  echo '  "$cli_dir/kubeneuronctl" --server http://127.0.0.1:8080 remediate quickstart-demo --class xid-app'
+  echo '  KubeNeuron records the incident and shows what it would do. It performs no node actions.'
+ fi
+fi

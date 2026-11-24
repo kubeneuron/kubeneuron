@@ -84,12 +84,73 @@ if (install) >/dev/null 2>&1; then
 fi
 grep -Fq "Conflicting recovery object GPURemediationPolicy/$name-cloud-xid-app" "$work/install.log" || fail "missing ownership conflict diagnostic"
 "$KUBECTL_BIN" label gpuremediationpolicy "$name-cloud-xid-app" kubeneuron.io/installed-by=install-sh "kubeneuron.io/installation=$name" kubeneuron.io/policy-pack=cloud >/dev/null
-install
+install --version v0.0.0-fixture
 [[ $("$KUBECTL_BIN" get gpuremediationpolicy "$name-cloud-xid-app" -o jsonpath='{.spec.priority}') == 891 ]] || fail "resume overwrote the existing policy"
 operator_args() {
  "$KUBECTL_BIN" -n kube-neuron get deployment kubeneuron-operator -o json |
   jq -r '.spec.template.spec.containers[] | select(.name == "operator") | .args[]'
 }
+# Run the four printed commands. Only the two candidate download URLs are
+# redirected to a local release-shaped fixture; the CLI and API are real.
+(
+    fixture_version=v0.0.0-fixture
+    platform=$(go env GOHOSTOS)-$(go env GOHOSTARCH)
+    bundle=kubeneuronctl-$fixture_version-$platform
+    mkdir -p "$work/release" "$work/clean-home" "$work/downloads"
+    cp "$REPO_ROOT/bin/kubeneuronctl" "$work/release/$bundle"
+    (
+        cd "$work/release"
+        tar -czf "$bundle.tar.gz" "$bundle" -C "$REPO_ROOT" NOTICE THIRD_PARTY_LICENSES LICENSE
+        shasum -a 256 "$bundle.tar.gz" > "checksums-$fixture_version.txt"
+    )
+    printf 'Installer CLI check: serving candidate archive and checksums from local fixtures for %s\n' "$fixture_version"
+    # Called by the printed download command sourced below.
+    # shellcheck disable=SC2329
+    curl() {
+        if [[ $# == 2 && $1 == -fsSLO ]]; then
+            case $2 in
+            "https://github.com/kubeneuron/kubeneuron/releases/download/$fixture_version/$bundle.tar.gz"|"https://github.com/kubeneuron/kubeneuron/releases/download/$fixture_version/checksums-$fixture_version.txt")
+                command curl "$1" "file://$work/release/${2##*/}"
+                return ;;
+            esac
+            fail "unexpected release asset URL"
+        fi
+        command curl "$@"
+    }
+    printed() {
+        awk -v prefix="  $1" 'index($0,prefix)==1 {print substr($0,3); n++} END {exit n!=1}' "$work/install.log"
+    }
+    printed 'cli_dir=' > "$work/download"
+    awk '/^  kubectl -n .* port-forward service\/.*-controller 8080:8080$/ {print substr($0,3); n++} END {exit n!=1}' "$work/install.log" > "$work/forward-command"
+    printed 'KUBENEURONCTL_TOKEN=' > "$work/status-command"
+    # shellcheck disable=SC2016
+    printed '"$cli_dir/kubeneuronctl" --server' > "$work/demo-command"
+    unset KUBENEURONCTL_TOKEN
+    export HOME="$work/clean-home" TMPDIR="$work/downloads"
+    cd "$HOME"
+    # shellcheck disable=SC1091
+    source "$work/download"
+    bash "$work/forward-command" >"$work/forward-command.log" 2>&1 &
+    forward_pid=$!
+    trap 'kill "$forward_pid" 2>/dev/null || true; wait "$forward_pid" 2>/dev/null || true' EXIT
+    for ((i=0; i<60; i++)); do
+        grep -q 'Forwarding from 127.0.0.1:8080' "$work/forward-command.log" && break
+        kill -0 "$forward_pid" || fail "printed port-forward failed"
+        sleep 1
+    done
+    # shellcheck disable=SC1091
+    source "$work/status-command" > "$work/first-status"
+    grep -Fxq 'automation paused: false' "$work/first-status" || fail "unexpected first status"
+    # shellcheck disable=SC1091
+    source "$work/demo-command" > "$work/demo-result"
+    # Run the rest of the documented demo recipe using the same CLI.
+    awk '/^<!-- first-run-recipe -->$/ {found=1; next} found && /^```sh$/ {copy=1; next} copy && /^```$/ {exit} copy {print}' \
+        "$REPO_ROOT/docs/quickstart.md" >"$work/demo-recipe"
+    head -1 "$work/demo-recipe" | cmp - "$work/demo-command" || fail "Quickstart demo differs from installer"
+    tail -n +2 "$work/demo-recipe" >"$work/show-demo"
+    # shellcheck disable=SC1091
+    source "$work/show-demo" >"$work/first-run.out"
+)
 cloud_args=$(operator_args)
 if grep -Eq '^--allow-node-level-actions(=true)?$' <<<"$cloud_args"; then
  fail "fresh cloud install enabled node-level actions"
@@ -127,7 +188,7 @@ other_metrics_uid=$("$KUBECTL_BIN" -n "$namespace" get pvc "$name-b-metrics-stor
 install
 [[ $("$KUBECTL_BIN" get kubeneuron "$name" -o jsonpath='{.spec.safety.executionMode}') == Paused ]] ||
 	fail "a re-run reset the installation's execution mode"
-grep -Fq 'API token     unchanged' "$work/install.log" || fail "a re-run did not report the kept API token"
+grep -Fq "API token     stored in the $name-operator-api-token Secret" "$work/install.log" || fail "missing token Secret location"
 "$KUBECTL_BIN" patch kubeneuron "$name" --type merge -p '{"spec":{"safety":{"executionMode":"DryRun"}}}' >/dev/null
 [[ $("$KUBECTL_BIN" get kubeneuron "$name" -o jsonpath='{.spec.observability.store.mode}/{.spec.observability.store.endpoint}/{.spec.observability.grafana.mode}') == External/http://metrics.example.invalid:8428/opentelemetry/Disabled ]] ||
 	fail "a re-run without --observability changed the installation's metrics path"
@@ -143,15 +204,7 @@ install
 connect_api
 "$KUBECTL_BIN" wait "kubeneuron/$name" --for='jsonpath={.status.conditions[?(@.type=="GPUVisibility")].reason}=NoGPUResource' --timeout=180s
 [[ -z $("$KUBECTL_BIN" get kubeneuron "$name" -o 'jsonpath={.status.conditions[?(@.type=="ResetAvailable")].type}') ]] || fail "reset condition present with node actions disabled"
-# Run the user-facing recipe against the installation this test just created.
-# Extract its fenced block so changes to the published commands run in CI.
-recipe="$work/first-run.sh"
-awk '/^<!-- first-run-recipe -->$/ {found=1; next} found && /^```sh$/ {copy=1; next} copy && /^```$/ {exit} copy {print}' \
-    "$REPO_ROOT/docs/quickstart.md" >"$recipe"
-[[ -s $recipe ]] || fail "first-run recipe missing"
 export PATH="$REPO_ROOT/bin:$PATH"
-SERVER="http://127.0.0.1:$port" KUBENEURONCTL_TOKEN="$(sed 's/^Authorization: Bearer //' "$work/header")" \
-    bash -eu -o pipefail "$recipe" >"$work/first-run.out"
 grep -Eq '^dry-run: +true$' "$work/first-run.out" || fail "first-run incident was not dry-run"
 grep -Fq "$name-observe (step " "$work/first-run.out" || fail "first-run incident lacks observe playbook"
 incident=$(awk '$1 == "id:" {print $2}' "$work/first-run.out")

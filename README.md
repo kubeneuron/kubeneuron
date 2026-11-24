@@ -20,6 +20,8 @@ Upgrading from 0.x releases is not supported. Uninstall the 0.x installation, th
 
 [Installation guide](docs/install.md) · [Documentation](docs/index.md)
 
+Follow the [Quickstart](docs/quickstart.md) to check your installation and open your first incident in DryRun mode.
+
 ## Architecture
 
 Kubernetes configuration and runtime execution are deliberately separate:

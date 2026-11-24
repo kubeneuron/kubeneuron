@@ -185,6 +185,32 @@ tag_re='v[0-9][0-9.]*(-[0-9A-Za-z.]+)?'
 chart_tag=$(sed -En "s|^  tag: ($tag_re)\$|\1|p" deploy/helm/kubeneuron/values.yaml | head -1)
 changelog_tag=$(sed -En "s|^## \[($tag_re)\].*|\1|p" CHANGELOG.md | head -1)
 kust_tag=$(sed -En "s|.*image: ghcr.io/kubeneuron/kubeneuron/operator:($tag_re)\$|\1|p" config/default/operator_deployment.yaml | head -1)
+# Check every literal release reference, including multiple pins on a command line.
+if ! python3 - "$changelog_tag" docs/quickstart.md docs/install.md <<'PYTHON'
+import re
+import sys
+from pathlib import Path
+
+expected = sys.argv[1]
+tag = r"v[0-9]+(?:\.[0-9]+){2}(?:-[0-9A-Za-z.-]+)?"
+patterns = (
+    re.compile(r"releases/download/(" + tag + r")/"),
+    re.compile(r"kubeneuronctl-(" + tag + r")-(?:linux|darwin)-"),
+    re.compile(r"checksums-(" + tag + r")\.txt"),
+)
+valid = True
+for filename in sys.argv[2:]:
+    for number, line in enumerate(Path(filename).read_text().splitlines(), 1):
+        for pattern in patterns:
+            for match in pattern.finditer(line):
+                if match[1] != expected:
+                    print(f"{filename}:{number}: found {match[1]}, expected {expected}", file=sys.stderr)
+                    valid = False
+sys.exit(0 if valid else 1)
+PYTHON
+then
+	fail=1
+fi
 if [[ -n $chart_tag && -n $changelog_tag && $chart_tag != "$changelog_tag" ]]; then
 	echo "STALE HELM CHART: deploy/helm/kubeneuron/values.yaml pins ${chart_tag}, CHANGELOG's newest release is ${changelog_tag}" >&2
 	fail=1

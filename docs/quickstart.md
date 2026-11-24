@@ -15,19 +15,37 @@ curl -fsSL https://github.com/kubeneuron/kubeneuron/releases/download/v1.0.0-rc.
 A release candidate is a pre-release and installs only by its explicit
 version. There is no latest release yet. Upgrading from 0.x is not supported.
 
-Use a cluster running Kubernetes 1.32 or later with a default StorageClass. The installer
-prints the port-forward command and credentials. Run that port-forward in a
-separate terminal. In your working terminal set `SERVER=http://127.0.0.1:8080`
-and supply the printed API token through `KUBENEURONCTL_TOKEN` in the
-environment. Use the matching release of `kubeneuronctl`: each release
-publishes `kubeneuronctl-<version>-<os>-<arch>.tar.gz` for linux and darwin,
-amd64 and arm64.
+Use a cluster running Kubernetes 1.32 or later with a default StorageClass.
+Follow the commands for your platform and release. This example uses Linux amd64 and the default
+installation. Replace every occurrence of `v1.0.0-rc.2` in this example with the
+version you installed. The [installation guide](install.md) explains how to
+verify the signature on that release’s checksum file.
+
+The third command reads the API token from the Kubernetes Secret
+and passes it to kubeneuronctl through the KUBENEURONCTL_TOKEN environment variable.
+
+In this terminal, download the CLI for the installed release and verify its checksum.
+
+```sh
+cli_dir=$(mktemp -d) && (cd "$cli_dir" && curl -fsSLO https://github.com/kubeneuron/kubeneuron/releases/download/v1.0.0-rc.2/kubeneuronctl-v1.0.0-rc.2-linux-amd64.tar.gz && curl -fsSLO https://github.com/kubeneuron/kubeneuron/releases/download/v1.0.0-rc.2/checksums-v1.0.0-rc.2.txt && awk -v file=kubeneuronctl-v1.0.0-rc.2-linux-amd64.tar.gz '$2 == file {print; found++} END {exit found != 1}' checksums-v1.0.0-rc.2.txt > cli.sha256 && sha256sum -c cli.sha256 && tar -xzf kubeneuronctl-v1.0.0-rc.2-linux-amd64.tar.gz kubeneuronctl-v1.0.0-rc.2-linux-amd64 && mv kubeneuronctl-v1.0.0-rc.2-linux-amd64 kubeneuronctl)
+```
+
+In a second terminal, start port forwarding to the controller and leave it running.
+
+```sh
+kubectl -n kube-neuron port-forward service/kubeneuron-controller 8080:8080
+```
+
+Back in the first terminal, load the API token from the Kubernetes Secret and check the controller's status.
+
+```sh
+KUBENEURONCTL_TOKEN=$(kubectl -n kube-neuron get secret kubeneuron-operator-api-token -o jsonpath='{.data.token}' | base64 -d) && export KUBENEURONCTL_TOKEN && "$cli_dir/kubeneuronctl" --server http://127.0.0.1:8080 status
+```
 
 ## Check GPU visibility
 
 ```sh
-kubeneuronctl --server "$SERVER" status
-kubeneuronctl --server "$SERVER" nodes
+"$cli_dir/kubeneuronctl" --server http://127.0.0.1:8080 nodes
 kubectl get kubeneuron kubeneuron -o yaml
 ```
 
@@ -70,12 +88,12 @@ installer binds this class to the observe playbook.
 
 <!-- first-run-recipe -->
 ```sh
-kubeneuronctl --server "$SERVER" remediate quickstart-demo --class xid-app
-incident=$(kubeneuronctl --server "$SERVER" incidents | awk '$3 == "xid-app" && $4 == "quickstart-demo" && !id {id=$1} END {print id}')
-kubeneuronctl --server "$SERVER" incidents show "$incident"
+"$cli_dir/kubeneuronctl" --server http://127.0.0.1:8080 remediate quickstart-demo --class xid-app
+incident=$("$cli_dir/kubeneuronctl" --server http://127.0.0.1:8080 incidents | awk '$3 == "xid-app" && $4 == "quickstart-demo" && !id {id=$1} END {print id}')
+"$cli_dir/kubeneuronctl" --server http://127.0.0.1:8080 incidents show "$incident"
 ```
 
 Look for `dry-run:   true` and the installation's observe playbook.
-Within about ten seconds the controller closes the incident, because
-`quickstart-demo` is not a node of the cluster; its audit trail says so.
+The incident can still be in `OBSERVING` when you first inspect it.
+Run the last command again to see its current state and audit trail.
 For the local Go walkthrough, see the [developer demo](developer-demo.md).
