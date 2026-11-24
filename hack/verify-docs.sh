@@ -71,6 +71,11 @@ if ! python3 -I hack/verify-backup-templates.py; then
     fail=1
 fi
 
+# A link to a renamed section still opens the page, so only a check sees it.
+if ! python3 -I hack/verify-doc-anchors.py || ! bash hack/test-verify-doc-anchors.sh; then
+	fail=1
+fi
+
 # --- derived facts: migration heads ----------------------------------------
 head_of() {
 	local f head=""

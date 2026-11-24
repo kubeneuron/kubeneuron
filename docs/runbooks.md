@@ -374,7 +374,7 @@ and no remediation can execute on it, while the pod looks healthy.
    for `controller registration never acknowledged` and the error it
    carries (TLS, 401/403, connection refused).
 2. Follow the identity ladder in
-   [troubleshooting](troubleshooting.md#agent-cannot-register): CA
+   [troubleshooting](troubleshooting.md#agent-pods-are-running-but-not-ready): CA
    mismatch, expired leaf (hard 100-day ceiling), URI-SAN vs. a recreated
    root UID, Pod-token race.
 3. **If the whole fleet is affected at once** (expired or wrong CA), do not

@@ -324,7 +324,7 @@ guest cannot reset the GPU); nothing is claimed for any other device.
 With `spec.safety.impactPreview.enabled` (the default), every park and re-park for
 approval computes, under the policy `budget` (default 15s, at most 60s), a
 durable `impact-preview/v1` record for `(incident, round)`: the node and its
-[device topology classification](#device-topology-read-only-v08-development),
+[device topology classification](#device-topology-read-only),
 the pending step and the coordinating disruptions downstream of it
 (`platform.drain`, `platform.evict_gpu_workload`), the workloads on the node
 — `total`, `gpu_holders`, `namespaces`, `eligible_for_checkpoint`, and

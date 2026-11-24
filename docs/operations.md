@@ -708,7 +708,7 @@ list per group in that namespace; no verb is added. Peer outcomes land in
 Start with `crossNode: false`.
 
 **Impact preview.** By default, the controller computes, at every park for approval, a durable record of what the
-pending step would touch (the [REST API reference](reference-api.md#impact-preview-v08-development)
+pending step would touch (the [REST API reference](reference-api.md#impact-preview)
 has the document), hands a three-line summary to the notification channels,
 and shows it in the panel's incident drawer and in
 `kubeneuronctl incidents impact`. It adds no verb: the listing it reads is
@@ -727,7 +727,7 @@ nothing is ever written to those objects. A cluster without the CRD group
 reports the resolver as not observed.
 Two self-monitoring alerts cover the two courtesies that can silently miss
 their audience, `KubeNeuronImpactPreviewUnavailable` and
-`KubeNeuronCheckpointAdvisoryUnreachable` ([runbooks](runbooks.md#workload-safe-recovery-alerts-v08-development-route-to-humans)).
+`KubeNeuronCheckpointAdvisoryUnreachable` ([runbooks](runbooks.md#workload-safe-recovery-alerts-route-to-humans)).
 The `examples/checkpoint/` directory holds three CPU-only toys — an Indexed
 Job, the same Job in a Kueue LocalQueue, a KubeRay Ray Train job — whose
 Pods read the advisory and the request off their own object and checkpoint;
