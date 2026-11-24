@@ -57,7 +57,12 @@ func (c *Controller) startStepThen(ctx context.Context, inc *types.Incident, ste
 	// The last stop for an observe-only class: the state walk never brings
 	// one here, so reaching it means a path that walk does not know about.
 	if reason, ok := detect.ObserveOnly(inc.Class); ok && !strings.HasPrefix(step.Action, "notify.") {
-		return c.quarantine(ctx, inc, legacyHandover("step "+step.Name+" refused: "+reason))
+		return c.quarantine(ctx, inc, handover{
+			What:        fmt.Sprintf("Class %s is set to observe only, but step %s asks for an action, so KubeNeuron did not run it.", inc.Class, step.Name),
+			Check:       fmt.Sprintf("Check which playbook the remediation policy assigns to this class. If node %s needs repair, do it by hand. Then run", inc.Target.Node),
+			Command:     "kubeneuronctl resolve " + inc.ID,
+			auditParams: map[string]string{"cause": "step " + step.Name + " refused: " + reason},
+		})
 	}
 	c.runtimeMu.RLock()
 	defer c.runtimeMu.RUnlock()
@@ -128,7 +133,12 @@ func (c *Controller) startStepThen(ctx context.Context, inc *types.Incident, ste
 	case confinementOutOfScope:
 		// Confirmed outside the blast radius: fail closed to a human. Never execute.
 		c.deferStep(inc, step, metrics.DeferConfinement)
-		return c.quarantine(ctx, inc, legacyHandover(reason))
+		return c.quarantine(ctx, inc, handover{
+			What:        fmt.Sprintf("KubeNeuron did not run step %s on node %s: the node is outside the nodes where this installation allows disruptive actions (spec.safety.destructiveExecution.nodeSelector).", step.Name, inc.Target.Node),
+			Check:       "Check the node's labels against that selector, whether this node should be repaired automatically at all, and whether earlier steps of this incident left the node cordoned or drained. After you handle the node by hand, run",
+			Command:     "kubeneuronctl resolve " + inc.ID,
+			auditParams: map[string]string{"cause": reason},
+		})
 	case confinementUnresolved:
 		c.deferStep(inc, step, metrics.DeferConfinement)
 		// The node's labels could not be resolved right now (a transient
@@ -142,7 +152,12 @@ func (c *Controller) startStepThen(ctx context.Context, inc *types.Incident, ste
 				"incident", inc.ID, "node", inc.Target.Node, "step", step.Name, "reason", reason)
 			return nil
 		}
-		return c.quarantine(ctx, inc, legacyHandover(reason+"; still unresolvable past the confinement deadline"))
+		return c.quarantine(ctx, inc, handover{
+			What:        fmt.Sprintf("KubeNeuron did not run step %s on node %s: it could not read the node's labels before the deadline, so it cannot confirm that the node is among those where this installation allows disruptive actions (spec.safety.destructiveExecution.nodeSelector).", step.Name, inc.Target.Node),
+			Check:       "Check that the node exists and that its labels match the selector, and whether earlier steps of this incident left the node cordoned or drained. After you handle the node by hand, run",
+			Command:     "kubeneuronctl resolve " + inc.ID,
+			auditParams: map[string]string{"cause": reason + "; still unresolvable past the confinement deadline"},
+		})
 	}
 	// Capability evidence is a precondition, not an execution failure. If a
 	// reset cannot be admitted because its runtime profile/report is absent,
@@ -155,7 +170,12 @@ func (c *Controller) startStepThen(ctx context.Context, inc *types.Incident, ste
 			// never be filled in by a later report, so a per-device reset here can
 			// never succeed. Fail closed to a human with the reason rather than
 			// re-deny this reset on every tick after the node was cordoned/drained.
-			return c.quarantine(ctx, inc, legacyHandover(err.Error()))
+			return c.quarantine(ctx, inc, handover{
+				What:        fmt.Sprintf("KubeNeuron did not start the reset in step %s: the incident does not identify the device on node %s.", step.Name, inc.Target.Node),
+				Check:       "Identify the faulty device on the node, and check whether earlier steps of this incident left the node cordoned or drained. After you handle it by hand, run",
+				Command:     "kubeneuronctl resolve " + inc.ID,
+				auditParams: map[string]string{"cause": err.Error()},
+			})
 		}
 		// Everything else here is missing/stale/mismatched evidence: the step is
 		// HELD, so the device keeps running whatever it is running. That is a
@@ -188,7 +208,12 @@ func (c *Controller) startStepThen(ctx context.Context, inc *types.Incident, ste
 			return nil
 		}
 		return c.quarantine(ctx, inc,
-			legacyHandover("accelerator reset evidence still unavailable past the evidence deadline: "+err.Error()))
+			handover{
+				What:        fmt.Sprintf("KubeNeuron did not start the reset in step %s: before the deadline it did not get the device information it needs from node %s.", step.Name, inc.Target.Node),
+				Check:       "Check that the KubeNeuron agent on the node is running and reports the device, and whether earlier steps of this incident left the node cordoned or drained. After you handle the device by hand, run",
+				Command:     "kubeneuronctl resolve " + inc.ID,
+				auditParams: map[string]string{"cause": "accelerator reset evidence still unavailable past the evidence deadline: " + err.Error()},
+			})
 	}
 	action := gateAction(step)
 	// A checkpoint warning only asks the node's jobs to save their state
@@ -328,7 +353,12 @@ func (c *Controller) runStep(ctx context.Context, engine *playbook.Engine, inc *
 			c.log.Error("audit append failed", "incident", inc.ID, "err", auditErr)
 		}
 		if errors.Is(err, errDeviceOutcomeUnknown) {
-			if qErr := c.quarantine(ctx, inc, legacyHandover(err.Error())); qErr != nil {
+			if qErr := c.quarantine(ctx, inc, handover{
+				What:        fmt.Sprintf("KubeNeuron requested %s on a device of node %s but cannot confirm whether it ran.", step.Action, inc.Target.Node),
+				Check:       "Before anything is repeated, compare the action in the incident history with the actual state of the device on that node. Then run",
+				Command:     "kubeneuronctl resolve " + inc.ID,
+				auditParams: map[string]string{"cause": err.Error()},
+			}); qErr != nil {
 				c.log.Error("device action handoff failed", "incident", inc.ID, "err", qErr)
 			}
 			return
@@ -346,7 +376,12 @@ func (c *Controller) runStep(ctx context.Context, engine *playbook.Engine, inc *
 			// so nothing new lands on it while the decision is pending.
 			reason := fmt.Sprintf("%s did not clear the device (%v); automation stops here "+
 				"rather than escalating to a more destructive step", step.Name, err)
-			if qErr := c.quarantine(ctx, inc, legacyHandover(reason)); qErr != nil {
+			if qErr := c.quarantine(ctx, inc, handover{
+				What:        fmt.Sprintf("KubeNeuron stopped after step %s: its check did not confirm that the device is idle, so the next, more disruptive step was not run.", step.Name),
+				Check:       fmt.Sprintf("Check what is running on the device of node %s, whether the idle check itself works, and whether earlier steps of this incident left the node cordoned or drained. After you handle the device by hand, run", inc.Target.Node),
+				Command:     "kubeneuronctl resolve " + inc.ID,
+				auditParams: map[string]string{"cause": reason},
+			}); qErr != nil {
 				c.log.Error("quarantine after an idle refusal failed", "incident", inc.ID, "err", qErr)
 			}
 			return

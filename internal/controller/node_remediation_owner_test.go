@@ -525,7 +525,10 @@ func checkLostResetResponse(t *testing.T, late bool) {
 		t.Fatal(err)
 	}
 	c.runStep(ctx, nil, mustIncident(t, st, inc.ID), step)
-	if len(act.actions) != 1 || mustIncident(t, st, inc.ID).State != types.StateNeedsHuman || !auditHas(trail(t, st, inc.ID), "quarantine", "device action outcome is unknown") {
+	want := "KubeNeuron requested agent.gpu_reset on a device of node " + inc.Target.Node + " but cannot confirm whether it ran. Before anything is repeated, compare the action in the incident history with the actual state of the device on that node. Then run kubeneuronctl resolve " + inc.ID
+	entries := trail(t, st, inc.ID)
+	last := entries[len(entries)-1]
+	if len(act.actions) != 1 || mustIncident(t, st, inc.ID).State != types.StateNeedsHuman || last.Action != "quarantine" || last.Result != want || last.Params["cause"] != "device action outcome is unknown (agent.gpu_reset): context deadline exceeded" {
 		t.Fatal("missing operator handoff after reset lost its response")
 	}
 	// Closing the incident records the operator's decision. Without a result
