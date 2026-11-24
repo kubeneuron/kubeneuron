@@ -2743,7 +2743,8 @@ exercise_backup_restore() {
 	wait_deployment_stopped "$TARGET_NAMESPACE" "${ROOT_NAME}-controller"
 
 	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" delete pod "$helper" --ignore-not-found --wait=true >/dev/null
-	sed "s/claimName: kubeneuron-controller-state/claimName: ${ROOT_NAME}-controller-state/" \
+	# The documented command (docs/operations.md, restore step 2).
+	sed "/# <name>/s/kubeneuron/${ROOT_NAME}/" \
 		"$REPO_ROOT/deploy/kubernetes/backup/restore-helper.yaml" |
 		"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" apply -f - >/dev/null
 	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" wait --for=condition=Ready "pod/$helper" --timeout=120s >/dev/null

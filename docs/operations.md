@@ -346,8 +346,10 @@ kubectl -n <ns> scale deploy/<name>-controller --replicas=0
 kubectl -n <ns> wait --for=delete pod \
   -l app.kubernetes.io/component=controller --timeout=2m
 
-# 2. Mount the state volume somewhere with a shell.
-kubectl -n <ns> apply -f deploy/kubernetes/backup/restore-helper.yaml
+# 2. Mount the state volume somewhere with a shell. The helper's claim is
+#    <name>-controller-state.
+sed '/# <name>/s/kubeneuron/<name>/' deploy/kubernetes/backup/restore-helper.yaml |
+  kubectl -n <ns> apply -f -
 kubectl -n <ns> wait --for=condition=Ready pod/kubeneuron-restore-helper --timeout=2m
 
 # 3. Copy the snapshot in and remove any stale WAL sidecars: they belong to
@@ -382,10 +384,20 @@ back up; the schema-version refusal above applies identically.
 **Scheduled backups:** the CronJob template in
 [`deploy/kubernetes/backup/`](https://github.com/kubeneuron/kubeneuron/tree/main/deploy/kubernetes/backup)
 downloads the snapshot endpoint daily onto a dedicated backup PVC with dated
-retention. It needs only the operator-token Secret and network reach to the
-controller Service — no `pods/exec` RBAC and nothing extra in the distroless
-image. The kind integration suite rehearses the full backup→wipe→restore
-cycle on every run, so the procedure above is exercised, not just written.
+retention. Its defaults match the installer's defaults. For another
+installation, set the name and namespace on its marked lines, then run one
+backup at once instead of waiting for the schedule:
+
+```sh
+sed -e '/# <name>/s/kubeneuron/<name>/' -e '/# <ns>/s/kube-neuron/<ns>/' \
+  deploy/kubernetes/backup/backup-cronjob.yaml | kubectl apply -f -
+kubectl -n <ns> create job kubeneuron-backup-first --from=cronjob/kubeneuron-backup
+kubectl -n <ns> wait --for=condition=complete job/kubeneuron-backup-first --timeout=15m
+```
+
+The Job needs only the operator-token Secret (`<name>-operator-api-token`)
+and network reach to the controller Service — no `pods/exec` RBAC and nothing extra in the distroless
+image. The kind integration suite includes a SQLite backup, wipe and restore scenario.
 
 A fresh installer run selects the cloud recovery pack. See [Recovery policies](install.md#recovery-policies-installed-by-the-script) for ladder selection and the node-level alpha option.
 

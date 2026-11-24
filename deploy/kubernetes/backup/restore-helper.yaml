@@ -4,16 +4,17 @@
 # The controller image is distroless (no shell, no sqlite3), and the restore
 # runs with the controller scaled to zero — so nothing would otherwise mount
 # the claim. Apply this, copy the file in, delete it. See
-# docs/operations.md, "Restoring from a backup".
+# docs/operations.md, "SQLite workflow store: backup and restore".
 #
-# Edit NAMESPACE and the claimName to match your installation:
-#   kubectl -n <ns> apply -f restore-helper.yaml
+# The claim name on the line marked "# <name>" defaults to the installer's
+# default installation, kubeneuron. For another installation, e.g. fleet:
+#   sed '/# <name>/s/kubeneuron/fleet/' restore-helper.yaml | kubectl -n <ns> apply -f -
 apiVersion: v1
 kind: Pod
 metadata:
   name: kubeneuron-restore-helper
   labels:
-    app.kubernetes.io/name: kubeneuron
+    app.kubernetes.io/name: kube-neuron
     app.kubernetes.io/component: restore-helper
 spec:
   restartPolicy: Never
@@ -24,6 +25,10 @@ spec:
     runAsUser: 65532
     runAsGroup: 65532
     fsGroup: 65532
+    # With the container settings below, fits the Pod Security "restricted"
+    # profile.
+    seccompProfile:
+      type: RuntimeDefault
   containers:
     - name: helper
       image: busybox:1.36
@@ -38,6 +43,4 @@ spec:
   volumes:
     - name: state
       persistentVolumeClaim:
-        # Default installation name; change if your root object is not
-        # called "kubeneuron".
-        claimName: kubeneuron-controller-state
+        claimName: kubeneuron-controller-state  # <name>-controller-state

@@ -82,6 +82,8 @@ API is `v1alpha1`.
 
 ### Fixed
 
+- Backups: the scheduled-backup CronJob template did not work as shipped. It named the controller of an installation called `fleet` but the token Secret of the default installation, so it made no backup for either without further edits. Its defaults now match the installer's defaults; for another installation, one documented `sed` command sets the name and the namespace together. The CronJob and the restore helper now set the fields the Pod Security `restricted` profile requires. The CronJob also sets fsGroup, so on volume types that apply it the Job's non-root user can write to a newly provisioned backup volume.
+
 - PagerDuty: an alert summary that reaches the Events v2 length limit is now cut between characters, so it no longer ends in a broken character. The approve and reject commands stay complete in the alert's custom details.
 
 - Store: timestamps with different fractional-second precision were compared as text. Within the same second, a queued action could occasionally be picked before an older one, and time filters and retention cutoffs could misplace a record. Ordering and comparisons of the affected timestamps are now chronological. Existing values are rewritten to a fixed width once, when the controller first starts after the upgrade; the schema version does not change. Records of the operational audit log are not modified.

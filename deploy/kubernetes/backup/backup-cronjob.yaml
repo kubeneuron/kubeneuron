@@ -9,16 +9,22 @@
 # Prerequisites:
 #   - spec.notifications.operatorAPIToken set on the installation (the same
 #     unowned Secret is referenced below).
-#   - Adjust INSTALLATION/namespace below (or kustomize-patch them).
+#   - The installation name and namespace appear on the lines marked
+#     "# <name>" and "# <ns>"; they default to the installer's defaults
+#     (kubeneuron in kube-neuron). For another installation, change them
+#     together, e.g. for install.sh --name fleet --namespace ops:
+#       sed -e '/# <name>/s/kubeneuron/fleet/' -e '/# <ns>/s/kube-neuron/ops/' \
+#         backup-cronjob.yaml | kubectl apply -f -
 #   - With spec.tls.publicServerSecretRef set, switch SCHEME to https and
 #     mount/trust the serving CA (see the commented lines).
 #
-# Restore procedure: docs/operations.md §"SQLite workflow store".
+# Restore procedure: docs/operations.md, "SQLite workflow store: backup and
+# restore".
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: kubeneuron-backups
-  namespace: kube-neuron            # spec.namespace of your installation
+  namespace: kube-neuron            # <ns>: the installation's namespace
 spec:
   accessModes: ["ReadWriteOnce"]
   resources:
@@ -29,7 +35,7 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: kubeneuron-backup
-  namespace: kube-neuron
+  namespace: kube-neuron            # <ns>
 spec:
   schedule: "15 2 * * *"            # daily 02:15
   concurrencyPolicy: Forbid
@@ -42,12 +48,26 @@ spec:
       template:
         spec:
           restartPolicy: Never
+          # Fits the Pod Security "restricted" profile. The user is the curl
+          # image's own (curl_user), so copies an earlier version of this
+          # template wrote stay readable and removable by the retention below.
+          # fsGroup makes a freshly formatted volume (owned by root) writable
+          # by that user; OnRootMismatch skips the ownership walk over the
+          # copies once the volume root already matches.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 100
+            runAsGroup: 101
+            fsGroup: 101
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile:
+              type: RuntimeDefault
           containers:
             - name: backup
               image: curlimages/curl:8.14.1   # pin a digest in production
               env:
                 - name: INSTALLATION
-                  value: fleet                # your KubeNeuron object name
+                  value: kubeneuron           # <name>: your KubeNeuron object name
                 - name: SCHEME
                   value: http                 # https with publicServerSecretRef
                 - name: KEEP
@@ -55,7 +75,7 @@ spec:
                 - name: OPERATOR_TOKEN
                   valueFrom:
                     secretKeyRef:
-                      name: kubeneuron-operator-api-token  # your token Secret
+                      name: kubeneuron-operator-api-token  # <name>-operator-api-token
                       key: token
               command: ["/bin/sh", "-ceu"]
               args:
@@ -71,6 +91,10 @@ spec:
                   test -s "$out"
                   ls -1t /backups/kubeneuron-*.db | tail -n +$((KEEP + 1)) | xargs -r rm -v
                   echo "retained:"; ls -lh /backups
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
               volumeMounts:
                 - name: backups
                   mountPath: /backups

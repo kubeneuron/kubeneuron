@@ -66,6 +66,11 @@ if ! python3 hack/verify-kubectl-docs.py || ! bash hack/test-verify-kubectl-docs
     fail=1
 fi
 
+# The backup templates must follow the installation the documented sed sets.
+if ! python3 -I hack/verify-backup-templates.py; then
+    fail=1
+fi
+
 # --- derived facts: migration heads ----------------------------------------
 head_of() {
 	local f head=""
