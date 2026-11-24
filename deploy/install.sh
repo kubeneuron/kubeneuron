@@ -244,6 +244,30 @@ restore_gpu_labels() {
 	done <<<"$labels"
 }
 
+restore_karpenter_pin() {
+	local snapshot=$1 node record patch attempt
+	node=$(jq -r '.metadata.name' <<<"$snapshot")
+	for attempt in 1 2; do
+		[[ $(jq -r '.metadata.annotations["karpenter.sh/do-not-disrupt"]' <<<"$snapshot") == true ]] || return 0
+		record=$(jq -r '.metadata.annotations["kubeneuron.io/cordon-restore"] // "unknown"' <<<"$snapshot")
+		case "$record" in
+		do-not-disrupt|unschedulable,do-not-disrupt) return 0 ;;
+		''|unschedulable) ;;
+		*) break ;;
+		esac
+		patch=$(jq -ce 'select(.metadata.resourceVersion | type == "string" and length > 0) |
+			{metadata:{resourceVersion:.metadata.resourceVersion, annotations:{"karpenter.sh/do-not-disrupt":null}}}' <<<"$snapshot") || break
+		if kubectl patch node "$node" --type=merge -p "$patch" >/dev/null; then
+			say "Removed the KubeNeuron Karpenter annotation on $node."
+			return 0
+		fi
+		if ((attempt == 1)); then
+			snapshot=$(kubectl get node "$node" -o json) || break
+		fi
+	done
+	say "Check who owns the Karpenter annotation on $node. If it is safe to remove, run: kubectl annotate node $node karpenter.sh/do-not-disrupt-"
+}
+
 operator_namespaces() {
 	kubectl get deployments --all-namespaces -l 'app.kubernetes.io/name=kube-neuron,app.kubernetes.io/component=operator' --field-selector metadata.name=kubeneuron-operator -o jsonpath='{range .items[*]}{.metadata.namespace}{"\n"}{end}'
 }
@@ -344,6 +368,13 @@ if ((UNINSTALL)); then
 			say "NVIDIA GPU Operator labels were left in place on $(jq -r '.metadata.name' <<<"$node_snapshot") because another KubeNeuron installation may still be using them."
 		fi
 	done < <(jq -c '.items[] | select(.metadata.annotations["kubeneuron.io/quiesced-accelerator-stack"] != null)' <<<"$nodes")
+	if [[ -z $remaining_installations ]]; then
+		while IFS= read -r node_snapshot; do
+			[[ -n $node_snapshot ]] || continue
+			restore_karpenter_pin "$node_snapshot"
+		done < <(jq -c '.items[] | select(.metadata.annotations["karpenter.sh/do-not-disrupt"] == "true" and
+			(.metadata.annotations | has("kubeneuron.io/cordon-restore") or has("kubeneuron.io/cordon-owners") or has("kubeneuron.io/cordon-reason")))' <<<"$nodes")
+	fi
 	node_commands=$(jq -r '.items[] | .metadata.name as $n |
 		(if .spec.unschedulable and (.metadata.annotations["kubeneuron.io/cordon-owners"] or .metadata.annotations["kubeneuron.io/cordon-reason"])
 		 then "kubectl uncordon " + $n else empty end),

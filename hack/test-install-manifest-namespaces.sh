@@ -73,6 +73,12 @@ if grep -Eq 'left in place: the operator|delete deployment/kubeneuron-operator' 
 cat >"$tmp/bin/kubectl" <<'MOCK'
 #!/usr/bin/env bash
 case " $* " in
+*" patch node "*)
+	printf '%s\n' "$*" >>"$UNINSTALL_MUTATIONS"
+	[[ $2 != node || $3 != changed ]] || exit 1 ;;
+*" get node changed -o json "*)
+	jq '.items[] | select(.metadata.name == "changed") | .metadata.resourceVersion = "2" |
+		.metadata.annotations["kubeneuron.io/cordon-restore"] = "do-not-disrupt"' "$NODE_LIST" ;;
 *" get kubeneuron kubeneuron --ignore-not-found "*) [[ -n ${ROOT_GONE:-} ]] || echo uid-1 ;;
 *" get kubeneuron kubeneuron -o jsonpath={.spec.namespace} "*) echo kube-neuron ;;
 *" get deployments --all-namespaces "*)
@@ -84,7 +90,7 @@ case " $* " in
 *" port-forward "*) [[ ${FAIL_AT:-} != tunnel ]] || exit 1; echo 'Forwarding from 127.0.0.1:43210 -> 8080'; exec sleep 30 ;;
 *" get kubeneuron kubeneuron -o json "*) if [[ ${FAIL_AT:-} == token ]]; then echo "{}"; exit; fi; echo '{"spec":{"notifications":{"operatorAPIToken":{"name":"operator-test"}}}}' ;;
 *" get secret operator-test -o json "*) [[ ${FAIL_AT:-} != secret ]] || exit 1; echo '{"data":{"token":"dGVzdA=="}}' ;;
-*" get nodes -o json "*) echo '{"items":[]}' ;;
+*" get nodes -o json "*) if [[ -n ${NODE_LIST:-} ]]; then cat "$NODE_LIST"; else echo '{"items":[]}'; fi ;;
 *" delete "*) echo delete >>"$UNINSTALL_MUTATIONS" ;;
 esac
 MOCK
@@ -134,3 +140,16 @@ for stage in token secret tunnel; do
 	tunnel) grep -Fq "no connection to Service 'kubeneuron-controller' in namespace 'kube-neuron' could be opened" "$tmp/error" ;;
 	esac
 done
+
+export NODE_LIST="$tmp/nodes"
+jq -n '{items: (["ours", "prior", "unknown", "changed"] | map(. as $name |
+	{metadata: {name: $name, resourceVersion: "1", annotations: {
+		"karpenter.sh/do-not-disrupt":"true", "kubeneuron.io/cordon-reason":"incident"
+	} + (if $name == "unknown" then {} else {"kubeneuron.io/cordon-restore":
+		(if $name == "prior" then "do-not-disrupt" else "" end)} end)}}))}' >"$NODE_LIST"
+: >"$UNINSTALL_MUTATIONS"
+ROOT_GONE=1 PATH="$tmp/bin:$PATH" bash deploy/install.sh --uninstall >"$tmp/pins"
+[[ $(grep -c '^patch node ' "$UNINSTALL_MUTATIONS") == 2 ]]
+grep -Fq 'patch node ours --type=merge -p {"metadata":{"resourceVersion":"1","annotations":{"karpenter.sh/do-not-disrupt":null}}}' "$UNINSTALL_MUTATIONS"
+grep -Fq 'patch node changed ' "$UNINSTALL_MUTATIONS"
+grep -Fq 'kubectl annotate node unknown karpenter.sh/do-not-disrupt-' "$tmp/pins"
