@@ -31,6 +31,8 @@ API is `v1alpha1`.
 
 - When an add-first replacement node is kept because it runs a workload or its removal cannot be confirmed, the incident names the pool, explains the possible extra charge and gives the command to record the outcome.
 
+- Replacement incidents use the cloud provider's error code to explain capacity failures and suggest an operator action. When the code does not distinguish capacity from quota, the incident asks the operator to check both. The classification follows provider documentation and has been tested with simulated errors. These failures have not been observed on live clusters.
+
 - Release images and the checksum file use Cosign 3 Sigstore bundles. The installation guide includes verification commands for both the new format and the detached signatures used by rc.1 and rc.2.
 
 ### Fixed
