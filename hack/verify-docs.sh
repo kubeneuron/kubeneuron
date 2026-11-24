@@ -87,6 +87,10 @@ head_of() {
 }
 sqlite_head=$(head_of internal/store/sqlite/migrations)
 pg_head=$(head_of internal/store/postgres/migrations)
+if ! python3 -I hack/verify-schema-numbers.py "$sqlite_head" "$pg_head" ||
+   ! bash hack/test-verify-schema-numbers.sh; then
+	fail=1
+fi
 doc=docs/design.md
 if grep -qE 'sqlite [0-9]{4} / (postgres|pg) [0-9]{4}' "$doc"; then
 		if ! grep -qE "sqlite ${sqlite_head} / (postgres|pg) ${pg_head}" "$doc"; then
