@@ -88,7 +88,7 @@ func TestResolveEarlierSuccessorReportsContinuingAttempt(t *testing.T) {
 		ID: "inc-earlier", Attempt: 2, State: types.StateExecuting,
 		Target: types.Target{Node: "worker"},
 		Successor: &types.SuccessorRecord{
-			Outcome: types.SuccessorHandedOver,
+			Outcome:   types.SuccessorHandedOver,
 			Successor: cloud.Successor{Operation: "inc-earlier-a1", Pool: "training"},
 		},
 	}
