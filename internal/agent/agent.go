@@ -20,6 +20,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	scheduleRand "math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
@@ -71,7 +72,7 @@ const (
 	// acceleratorProfileResponseLimit bounds a controller response before it
 	// is decoded into the narrow profile-binding wire type.
 	acceleratorProfileResponseLimit = 64 << 10
-	// actionPollInterval is how often the agent asks the controller for
+	// actionPollInterval is the initial delay after a poll finds no
 	// queued work. Polling rides the authenticated channel, so the node
 	// needs no listener or serving certificate of its own.
 	actionPollInterval       = 5 * time.Second
@@ -651,7 +652,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	// reset or reboot) must not stall event capture or heartbeats.
 	go a.actionLoop(ctx)
 
-	retry := time.NewTicker(a.cfg.RegistrationInterval)
+	retry := time.NewTimer(time.Duration(scheduleRand.Float64() * float64(a.cfg.RegistrationInterval)))
 	defer retry.Stop()
 
 	for {
@@ -726,6 +727,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			}
 			a.handleDetection(ctx, ev.event, ev.source)
 		case <-retry.C:
+			retry.Reset(jitteredDelay(a.cfg.RegistrationInterval, a.cfg.RegistrationInterval/10, a.cfg.RegistrationInterval+a.cfg.RegistrationInterval/10, scheduleRand.Float64()))
 			if events == nil && ctx.Err() == nil {
 				if ch, err := a.watcher.Watch(ctx); err != nil {
 					a.logKernelOpenError(err)
@@ -1303,23 +1305,34 @@ func newEventID() string {
 // sequentially. Sequential execution is deliberate: node-level remediation
 // steps must never race each other on one node.
 func (a *Agent) actionLoop(ctx context.Context) {
-	tick := time.NewTicker(actionPollInterval)
-	defer tick.Stop()
-	// Resume a locally durable outcome before asking the controller for another
-	// action. This uses the original persisted lease, so a restart cannot
-	// invalidate another live agent's claim by polling again.
-	a.recoverQueuedActions(ctx)
+	// Recover a durable outcome before the first poll and on subsequent retries.
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	delay := actionPollInterval
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-tick.C:
+		case <-timer.C:
 			a.recoverQueuedActions(ctx)
-			for a.runQueuedAction(ctx) {
-				// Drain the queue before sleeping again.
+			for ctx.Err() == nil && a.runQueuedAction(ctx) {
+				delay = actionPollInterval
 			}
+			wait := jitteredDelay(delay, delay/5, 3*actionPollInterval, scheduleRand.Float64())
+			delay = min(delay+actionPollInterval, 3*actionPollInterval)
+			// Retry a pending lease/result at the original cadence.
+			if len(a.journal.ListRecoverable()) > 0 {
+				wait = min(wait, actionPollInterval)
+				delay = actionPollInterval
+			}
+			timer.Reset(wait)
 		}
 	}
+}
+
+func jitteredDelay(base, spread, ceiling time.Duration, draw float64) time.Duration {
+	low, high := base-spread, min(base+spread, ceiling)
+	return low + time.Duration(float64(high-low)*draw)
 }
 
 // runQueuedAction fetches and processes at most one controller action. The

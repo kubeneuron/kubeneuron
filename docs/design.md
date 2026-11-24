@@ -329,6 +329,8 @@ destructive-execution scope, approvals, and deployed agent capabilities; a
 supported driver/runtime combination still requires the deployment's
 qualification procedure.
 
+When an agent has no actions to run, it waits up to 15 seconds between polls, so it can take that long, plus the time of the request itself, before the agent picks up a newly queued action. After processing an action, the agent checks for the next one immediately.
+
 The approval path parks an incident in `AWAITING_APPROVAL`, records an
 authenticated decision and channel, and expires it after a TTL without ever
 auto-approving. REST, CLI, and the native control panel record decisions;
