@@ -17,7 +17,7 @@ const (
 func (r Reason) Guidance() string {
 	switch r {
 	case Unavailable:
-		return "The cloud reported no capacity for this machine type in this zone. To recover sooner, use a pool in another zone or with another machine type."
+		return "The cloud reported no capacity for this machine type in this zone. Use a pool in another zone or with another machine type, or wait until the cloud has capacity."
 	case Quota:
 		return "The account's quota for this machine type is used up. Request a quota increase from the cloud provider."
 	case NetworkAddresses:
