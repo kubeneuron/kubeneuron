@@ -52,6 +52,7 @@ PROFILE=auto
 UNINSTALL=0
 DELETE_DATA=0
 ASSUME_YES=0
+SKIP_INCIDENT_CHECK=0
 OBSERVABILITY=""
 CONTROLLER_IMAGE=""
 AGENT_IMAGE=""
@@ -80,6 +81,7 @@ Flags:
   --uninstall            remove this installation; retain SQLite state and metrics by default
   --delete-data          with --uninstall: also delete the SQLite PVC with the audit
                          data and the Managed metrics store's PVC
+  --skip-open-incident-check   uninstall without checking for unfinished cloud replacements
   --yes                  confirm --delete-data without an interactive prompt
 USAGE
 }
@@ -96,6 +98,7 @@ while (($#)); do
 	--controller-image) CONTROLLER_IMAGE=$2; shift 2 ;;
 	--agent-image) AGENT_IMAGE=$2; shift 2 ;;
 	--observability) OBSERVABILITY=${2:?missing observability mode}; shift 2 ;;
+	--skip-open-incident-check) SKIP_INCIDENT_CHECK=1; shift ;;
 	--uninstall) UNINSTALL=1; shift ;;
 	--delete-data) DELETE_DATA=1; shift ;;
 	--yes) ASSUME_YES=1; shift ;;
@@ -107,6 +110,7 @@ done
 say() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
+((SKIP_INCIDENT_CHECK == 0 || UNINSTALL == 1)) || die "--skip-open-incident-check requires --uninstall"
 ((DELETE_DATA == 0 || UNINSTALL == 1)) || die "--delete-data requires --uninstall"
 ((ASSUME_YES == 0 || DELETE_DATA == 1)) || die "--yes requires --uninstall --delete-data"
 [[ $NAME =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ && ${#NAME} -le 63 ]] || die "invalid installation name"
@@ -173,7 +177,73 @@ fetch_manifest() { # $1=version $2=dest
 	[[ -s $2 ]] || die "could not download the $1 install manifest"
 }
 
+unfinished_cloud_incidents() (
+	umask 077
+	local dir pid="" root auth key tls port="" deadline host bearer
+	local -a transport=()
+	dir=$(mktemp -d) || return 1
+	trap 'if [[ -n $pid ]]; then kill "$pid" 2>/dev/null || :; wait "$pid" 2>/dev/null || :; fi; rm -rf "$dir"' EXIT
+	root=$(kubectl get kubeneuron "$NAME" -o json) || return 1
+	auth=$(jq -er '.spec.notifications.operatorAPIToken.name' <<<"$root") || return 1
+	key=$(jq -r '.spec.notifications.operatorAPIToken.key // "token"' <<<"$root") || return 1
+	bearer=$(kubectl -n "$NS" get secret "$auth" -o json | jq -er --arg k "$key" '.data[$k] | @base64d') || return 1
+	[[ -n $bearer && $bearer != *[[:cntrl:]]* ]] || return 1
+	printf 'Authorization: Bearer %s\n' "$bearer" >"$dir/header"
+	tls=$(jq -r '.spec.tls.publicServerSecretRef.name // empty' <<<"$root") || return 1
+	kubectl -n "$NS" port-forward --address=127.0.0.1 "service/$NAME-controller" :8080 >"$dir/forward" 2>&1 &
+	pid=$!
+	deadline=$((SECONDS + 15))
+	while ((SECONDS < deadline)); do
+		kill -0 "$pid" 2>/dev/null || return 1
+		port=$(sed -n 's/^Forwarding from 127[.]0[.]0[.]1:\([0-9][0-9]*\) -> .*/\1/p' "$dir/forward")
+		[[ -z $port ]] || break
+		sleep 0.2
+	done
+	[[ -n $port ]] || return 1
+	host="http://127.0.0.1:$port"
+	if [[ -n $tls ]]; then
+		host="https://$NAME-controller.$NS.svc:$port"
+		kubectl -n "$NS" get secret "$tls" -o jsonpath='{.data.ca\.crt}' | openssl base64 -d -A >"$dir/ca" || return 1
+		transport+=(--resolve "$NAME-controller.$NS.svc:$port:127.0.0.1")
+		[[ ! -s $dir/ca ]] || transport+=(--cacert "$dir/ca")
+	fi
+	curl --disable --noproxy '*' -fsS --max-time 30 ${transport[@]+"${transport[@]}"} -H "@$dir/header" "$host/api/v1/incidents" |
+		jq -er 'if type != "array" then error("invalid incident list") else
+			[.[] | select(any(.successor, .remove_first; . != null and ((.outcome // "") == "" or .outcome == "needs-operator"))) |
+			 .id | if type == "string" and test("^[a-zA-Z0-9._-]+$") then . else error("invalid incident ID") end] | join(", ") end'
+)
+
+restore_gpu_labels() {
+	local snapshot=$1 node patch labels attempt
+	node=$(jq -r '.metadata.name' <<<"$snapshot")
+	for attempt in 1 2; do
+		patch=$(jq -c '
+			.metadata as $m | ($m.annotations["kubeneuron.io/quiesced-accelerator-stack"] // "") as $marker |
+			select($marker != "") |
+			{metadata: {resourceVersion: $m.resourceVersion,
+				annotations: {"kubeneuron.io/quiesced-accelerator-stack": null},
+				labels: ([$marker | split(",")[] |
+					select(. == "dcgm" or . == "dcgm-exporter" or . == "device-plugin") |
+					"nvidia.com/gpu.deploy." + . | select($m.labels[.] == "false") |
+					{key: ., value: "true"}] | from_entries)}}' <<<"$snapshot")
+		[[ -n $patch ]] || return 0
+		labels=$(jq -r '.metadata.labels | keys[]' <<<"$patch")
+		if kubectl patch node "$node" --type=merge -p "$patch" >/dev/null; then
+			[[ -z $labels ]] || say "Turned NVIDIA GPU Operator components back on for: $node"
+			return 0
+		fi
+		if ((attempt == 1)); then
+			snapshot=$(kubectl get node "$node" -o json) || break
+		fi
+	done
+	say "Could not restore NVIDIA GPU Operator labels on $node. Check the node before applying these commands:"
+	while IFS= read -r label; do
+		[[ -z $label ]] || printf 'kubectl label node %s %s=true --overwrite\n' "$node" "$label"
+	done <<<"$labels"
+}
+
 if ((UNINSTALL)); then
+	command -v jq >/dev/null || die "jq is required for uninstall"
 	claim="$NAME-controller-state"
 	# The Managed metrics store's claim outlives the installation (the
 	# operator never deletes it). Only a claim labelled as this
@@ -189,6 +259,10 @@ if ((UNINSTALL)); then
 		actual_ns=$(kubectl get kubeneuron "$NAME" -o jsonpath='{.spec.namespace}')
 		[[ $actual_ns == "$NS" ]] || die "installation is in namespace $actual_ns; pass --namespace $actual_ns"
 		[[ -z $(kubectl get kubeneuron "$NAME" -o jsonpath='{.metadata.deletionTimestamp}') ]] || die "root is already being deleted; retention cannot be guaranteed"
+	fi
+	if ((SKIP_INCIDENT_CHECK == 0)); then
+		risky_incidents=$(unfinished_cloud_incidents 2>/dev/null) || die "Uninstall stopped: KubeNeuron could not check for open incidents. Restore access to the controller and try again, or repeat with --skip-open-incident-check"
+		[[ -z $risky_incidents ]] || die "Uninstall stopped: these incidents have a cloud replacement in progress or waiting for the operator: $risky_incidents. Uninstalling now leaves their cloud changes (for example a resized pool or tags) without a record. Finish or resolve them first, or repeat with --skip-open-incident-check"
 	fi
 	claim_uid=$(kubectl -n "$NS" get pvc "$claim" --ignore-not-found -o jsonpath='{.metadata.uid}')
 	if [[ -n $claim_uid ]]; then
@@ -220,13 +294,43 @@ if ((UNINSTALL)); then
 	fi
 	say "removing KubeNeuron installation '$NAME' (namespace $NS)"
 	kubectl delete kubeneuron "$NAME" --ignore-not-found --wait=true --timeout=120s
-	# The journal mount label is the one change KubeNeuron makes to Node
-	# objects in every mode. Another installation keeps using it.
-	if [[ -z $(kubectl get kubeneuron -o name 2>/dev/null) ]]; then
+	# Stop every controller replica before restoring node labels. Deleting
+	# the root returns before Kubernetes finishes deleting its dependants.
+	controller_selector="app.kubernetes.io/instance=$NAME,app.kubernetes.io/component=controller,app.kubernetes.io/managed-by=kubeneuron-operator"
+	deadline=$((SECONDS + 120))
+	while :; do
+		controller_deployment=$(kubectl -n "$NS" get deployment "$NAME-controller" --ignore-not-found -o name)
+		controller_pods=$(kubectl -n "$NS" get pods -l "$controller_selector" -o name)
+		[[ -z $controller_deployment && -z $controller_pods ]] && break
+		((SECONDS < deadline)) || die "controller is still present in namespace '$NS'; check its Deployment and Pods before retrying uninstall"
+		sleep 2
+	done
+	# Another installation keeps using the shared journal label.
+	remaining_installations=$(kubectl get kubeneuron -o name)
+	if [[ -z $remaining_installations ]]; then
 		kubectl label nodes --all kubeneuron.io/journal-dir- >/dev/null
 		say "removed the kubeneuron.io/journal-dir node label"
 	else
 		say "left the kubeneuron.io/journal-dir node label: another KubeNeuron installation uses it"
+	fi
+	nodes=$(kubectl get nodes -o json)
+	while IFS= read -r node_snapshot; do
+		[[ -n $node_snapshot ]] || continue
+		if [[ -z $remaining_installations ]]; then
+			restore_gpu_labels "$node_snapshot"
+		else
+			say "NVIDIA GPU Operator labels were left in place because another KubeNeuron installation may still be using them."
+			break
+		fi
+	done < <(jq -c '.items[] | select(.metadata.annotations["kubeneuron.io/quiesced-accelerator-stack"] != null)' <<<"$nodes")
+	node_commands=$(jq -r '.items[] | .metadata.name as $n |
+		(if .spec.unschedulable and (.metadata.annotations["kubeneuron.io/cordon-owners"] or .metadata.annotations["kubeneuron.io/cordon-reason"])
+		 then "kubectl uncordon " + $n else empty end),
+		(if any(.spec.taints[]?; .key == "kubeneuron.io/degraded")
+		 then "kubectl taint nodes " + $n + " kubeneuron.io/degraded-" else empty end)' <<<"$nodes")
+	if [[ -n $node_commands ]]; then
+		say "These nodes still have a KubeNeuron cordon or taint. Check each node before returning it to service:"
+		printf '%s\n' "$node_commands"
 	fi
 	# Include legacy objects without the new installation label, but never
 	# delete one unless its actual reference names this installation.
@@ -262,6 +366,9 @@ if ((UNINSTALL)); then
 	fi
 	say "left in place: the operator, CRDs, namespace '$NS', and any external database"
 	say "Do not delete the full install manifest if you want to keep the data: it deletes the kube-neuron namespace, including any retained volume claims in it, and all KubeNeuron CRDs and custom resources in the cluster."
+	if [[ $NS != kube-neuron ]] && ((DELETE_DATA == 0)); then
+		say "The volume claims retained by this uninstall are in namespace '$NS', which the install manifest does not delete."
+	fi
 	say "If no other KubeNeuron installation needs this operator, remove only the operator and its permissions:"
 	cat <<'COMMANDS'
 kubectl -n kube-neuron delete deployment/kubeneuron-operator serviceaccount/kubeneuron-operator role/kubeneuron-operator-leader-election rolebinding/kubeneuron-operator-leader-election --ignore-not-found

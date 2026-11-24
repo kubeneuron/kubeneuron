@@ -39,6 +39,7 @@ API is `v1alpha1`.
 
 - Agents now space out action polls when the queue is empty or the controller is unavailable, and stagger registration heartbeats. On an idle node, the agent now waits up to 15 seconds between polls (previously about 5 seconds), so a newly queued action is picked up later than before.
 
+- install.sh --uninstall stops when an incident has a cloud replacement in progress (override with --skip-open-incident-check), turns back on the NVIDIA GPU Operator components that KubeNeuron had turned off on a node, and lists nodes that still have a KubeNeuron cordon or taint with the commands to remove them.
 - When automatic repair stops after repeated failures, an approval decision, or missing recovery evidence, the incident now tells the operator what to check and how to close it.
 
 - When an add-first replacement node is kept because it runs a workload or its removal cannot be confirmed, the incident names the pool, explains the possible extra charge and gives the command to record the outcome.
