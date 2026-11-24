@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -44,6 +45,7 @@ func main() {
 		probeAddr             = flag.String("health-probe-bind-address", ":8081", "address for health probes")
 		leaderElect           = flag.Bool("leader-elect", true, "enable Kubernetes Lease leader election")
 		leaderNamespace       = flag.String("leader-election-namespace", "", "namespace for the leader-election Lease (default: pod namespace)")
+		checkUninstall        = flag.Bool("check-uninstall", false, "check for remaining installations before removing the operator")
 		showVersion           = flag.Bool("version", false, "print version and exit")
 		allowNodeLevelActions = flag.Bool("allow-node-level-actions", false, "permit installations to opt into alpha node-level actions")
 		defaultAdapters       = flag.String("default-agent-adapters", "",
@@ -76,6 +78,25 @@ func main() {
 	utilruntime.Must(rbacv1.AddToScheme(scheme))
 	utilruntime.Must(networkingv1.AddToScheme(scheme))
 	utilruntime.Must(kubeneuronv1alpha1.AddToScheme(scheme))
+
+	if *checkUninstall {
+		reader, err := client.New(ctrl.GetConfigOrDie(), client.Options{Scheme: scheme})
+		if err == nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			var roots kubeneuronv1alpha1.KubeNeuronList
+			err = reader.List(ctx, &roots, client.Limit(1))
+			if err == nil && len(roots.Items) > 0 {
+				fmt.Fprintf(os.Stderr, "KubeNeuron installation '%s' still exists. Run install.sh --uninstall first, then repeat helm uninstall. To remove only the operator anyway, repeat with --no-hooks\n", roots.Items[0].Name)
+				os.Exit(1)
+			}
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Could not check remaining KubeNeuron installations:", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                  scheme,

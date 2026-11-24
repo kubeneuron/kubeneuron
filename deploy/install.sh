@@ -244,6 +244,10 @@ restore_gpu_labels() {
 	done <<<"$labels"
 }
 
+operator_namespaces() {
+	kubectl get deployments --all-namespaces -l 'app.kubernetes.io/name=kube-neuron,app.kubernetes.io/component=operator' --field-selector metadata.name=kubeneuron-operator -o jsonpath='{range .items[*]}{.metadata.namespace}{"\n"}{end}'
+}
+
 if ((UNINSTALL)); then
 	command -v curl >/dev/null || die "curl is required for uninstall"
 	command -v jq >/dev/null || die "jq is required for uninstall"
@@ -262,6 +266,10 @@ if ((UNINSTALL)); then
 		actual_ns=$(kubectl get kubeneuron "$NAME" -o jsonpath='{.spec.namespace}')
 		[[ $actual_ns == "$NS" ]] || die "installation is in namespace $actual_ns; pass --namespace $actual_ns"
 		[[ -z $(kubectl get kubeneuron "$NAME" -o jsonpath='{.metadata.deletionTimestamp}') ]] || die "root is already being deleted; retention cannot be guaranteed"
+	fi
+	if [[ -n $root_uid ]] && ((DELETE_DATA == 0)); then
+		operator_names=$(operator_namespaces) || die "Uninstall stopped: could not check for the operator Deployment. Check that your kubectl account can list Deployments across namespaces."
+		[[ -n $operator_names ]] || die "Uninstall stopped: the KubeNeuron operator is not installed, so it cannot confirm that the stored data is kept. Nothing was removed. Install the operator again (release manifest or Helm chart) and repeat the uninstall, or, to delete the installation and its managed volume claims, repeat with --delete-data."
 	fi
 	if [[ -n $root_uid ]] && ((SKIP_INCIDENT_CHECK == 0)); then
 		# This snapshot cannot prevent new repairs before the controller stops.
@@ -377,14 +385,23 @@ if ((UNINSTALL)); then
 		say "retained SQLite PVC $NS/$claim and its data (if present); reinstall with the same name, namespace and storage settings"
 		[[ -z $metrics_uid ]] || say "retained metrics store PVC $NS/$metrics_claim: up to 30 days of metrics, including node names. Erase them with: kubectl delete pvc $metrics_claim -n $NS"
 	fi
-	say "left in place: the operator, CRDs, namespace '$NS', and any external database"
+	say "This script leaves CRDs, the installation namespace and any external database untouched."
 	say "Do not delete the full install manifest if you want to keep the data: it deletes the kube-neuron namespace, including any retained volume claims in it, and all KubeNeuron CRDs and custom resources in the cluster."
 	if [[ $NS != kube-neuron ]] && ((DELETE_DATA == 0)); then
 		say "The volume claims retained by this uninstall are in namespace '$NS', which the install manifest does not delete."
 	fi
+	if ! operator_ns=$(operator_namespaces); then
+		say "Could not check which operator Deployments remain. Inspect the Deployments before removing operator resources."
+		exit 0
+	fi
+	[[ -n $operator_ns ]] || exit 0
+	if [[ $operator_ns == *$'\n'* ]]; then
+		say "Multiple operator Deployments remain. Check which installations use each operator before removing it."
+		exit 0
+	fi
 	say "If no other KubeNeuron installation needs this operator, remove only the operator and its permissions:"
-	cat <<'COMMANDS'
-kubectl -n kube-neuron delete deployment/kubeneuron-operator serviceaccount/kubeneuron-operator role/kubeneuron-operator-leader-election rolebinding/kubeneuron-operator-leader-election --ignore-not-found
+	cat <<COMMANDS
+kubectl -n $operator_ns delete deployment/kubeneuron-operator serviceaccount/kubeneuron-operator role/kubeneuron-operator-leader-election rolebinding/kubeneuron-operator-leader-election --ignore-not-found
 kubectl -n default delete role/kubeneuron-operator-root-events rolebinding/kubeneuron-operator-root-events --ignore-not-found
 kubectl delete clusterrole/kubeneuron-operator clusterrolebinding/kubeneuron-operator --ignore-not-found
 COMMANDS

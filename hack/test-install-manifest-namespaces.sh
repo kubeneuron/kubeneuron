@@ -35,7 +35,12 @@ echo "install manifest namespaces: OK"
 
 # Exercise the actual uninstall output without connecting to a cluster.
 mkdir "$tmp/bin"
-printf '#!/bin/sh\nexit 0\n' >"$tmp/bin/kubectl"
+cat >"$tmp/bin/kubectl" <<'MOCK'
+#!/bin/sh
+case " $* " in
+*" get deployments --all-namespaces "*) echo "${OPERATOR_NS-kube-neuron}" ;;
+esac
+MOCK
 chmod +x "$tmp/bin/kubectl"
 PATH="$tmp/bin:$PATH" bash deploy/install.sh --uninstall --skip-open-incident-check >"$tmp/uninstall.log"
 grep -Fq 'Do not delete the full install manifest if you want to keep the data' "$tmp/uninstall.log"
@@ -59,12 +64,23 @@ diff -u "$tmp/operator-objects" "$tmp/hinted-objects"
 PATH="$tmp/bin:$PATH" bash deploy/install.sh --uninstall --skip-open-incident-check --namespace training >"$tmp/custom-namespace.log"
 grep -Fq "The volume claims retained by this uninstall are in namespace 'training', which the install manifest does not delete." "$tmp/custom-namespace.log"
 
+OPERATOR_NS=ops PATH="$tmp/bin:$PATH" bash deploy/install.sh --uninstall >"$tmp/ops"
+grep -Fq 'kubectl -n ops delete deployment/kubeneuron-operator' "$tmp/ops"
+OPERATOR_NS='' PATH="$tmp/bin:$PATH" bash deploy/install.sh --uninstall --delete-data --yes >"$tmp/absent"
+if grep -Eq 'left in place: the operator|delete deployment/kubeneuron-operator' "$tmp/absent"; then exit 1; fi
+
 # Run the preflight through the installer with a synthetic Service and Secret.
 cat >"$tmp/bin/kubectl" <<'MOCK'
 #!/usr/bin/env bash
 case " $* " in
 *" get kubeneuron kubeneuron --ignore-not-found "*) [[ -n ${ROOT_GONE:-} ]] || echo uid-1 ;;
 *" get kubeneuron kubeneuron -o jsonpath={.spec.namespace} "*) echo kube-neuron ;;
+*" get deployments --all-namespaces "*)
+	case ${FAIL_AT:-} in
+	operator-absent) exit 0 ;;
+	operator-forbidden) exit 1 ;;
+	*) echo kube-neuron ;;
+	esac ;;
 *" port-forward "*) [[ ${FAIL_AT:-} != tunnel ]] || exit 1; echo 'Forwarding from 127.0.0.1:43210 -> 8080'; exec sleep 30 ;;
 *" get kubeneuron kubeneuron -o json "*) if [[ ${FAIL_AT:-} == token ]]; then echo "{}"; exit; fi; echo '{"spec":{"notifications":{"operatorAPIToken":{"name":"operator-test"}}}}' ;;
 *" get secret operator-test -o json "*) [[ ${FAIL_AT:-} != secret ]] || exit 1; echo '{"data":{"token":"dGVzdA=="}}' ;;
@@ -78,6 +94,17 @@ cat "$INCIDENT_LIST"
 MOCK
 chmod +x "$tmp/bin/curl"
 export INCIDENT_LIST="$tmp/incidents" UNINSTALL_MUTATIONS="$tmp/mutations"
+for stage in operator-absent operator-forbidden; do
+	if FAIL_AT=$stage PATH="$tmp/bin:$PATH" bash deploy/install.sh --uninstall >"$tmp/error" 2>&1; then
+		echo "uninstall continued after $stage" >&2
+		exit 1
+	fi
+	case "$stage" in
+	operator-absent) grep -Fq 'operator is not installed' "$tmp/error" ;;
+	operator-forbidden) grep -Fq 'could not check for the operator Deployment' "$tmp/error" ;;
+	esac
+	[[ ! -e $UNINSTALL_MUTATIONS ]]
+done
 for payload in '{"invalid":"response"}' '[{"id":"inc-42","remove_first":{"outcome":"needs-operator"}}]' '[{"id":"inc-42","successor":{}}]'; do
 	printf '%s\n' "$payload" >"$INCIDENT_LIST"
 	if PATH="$tmp/bin:$PATH" bash deploy/install.sh --uninstall >"$tmp/preflight" 2>&1; then

@@ -1,0 +1,5 @@
+Before removing this operator release, run install.sh --uninstall for each installation.
+If the pre-delete check fails, inspect its output:
+  kubectl -n {{ .Release.Namespace }} logs job/kubeneuron-operator-uninstall-check
+To remove only the operator anyway, run:
+  helm uninstall {{ .Release.Name }} -n {{ .Release.Namespace }} --no-hooks
