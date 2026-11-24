@@ -178,7 +178,7 @@ spec:
           annotations:
             runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronnotificationsdropped"
             summary: "KubeNeuron dropped {{ $value }} notifications in 15m"
-            description: "Delivery queue overflow — approval requests may be among the lost messages."
+            description: "Check the kind label. A dead_letter means delivery attempts failed; event or approval_request means the channel queue was full. Approval requests may be among the lost messages."
 
         - alert: KubeNeuronAgentSpoolBacklog
           expr: kubeneuron_agent_spool_depth > 100

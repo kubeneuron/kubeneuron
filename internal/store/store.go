@@ -381,6 +381,16 @@ type AcceleratorReportStore interface {
 	ListAcceleratorReports(ctx context.Context, node string) ([]*types.AgentAcceleratorReport, error)
 }
 
+// ApprovalNotificationStore records which notification channels accepted an
+// approval round's request, so the controller can send it again to the
+// others, also after a restart. A store without it sends each request once.
+type ApprovalNotificationStore interface {
+	// MarkApprovalNotified records that channel accepted round epoch's
+	// request of incident id. It is a no-op when epoch is no longer the
+	// incident's current round or the channel is already recorded.
+	MarkApprovalNotified(ctx context.Context, id string, epoch int, channel string) error
+}
+
 // ImpactPreviewStore persists the impact previews of approval rounds.
 // It is an optional extension for the same reason as the
 // others: a store without it means "no preview was retained", which the API

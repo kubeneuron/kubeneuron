@@ -26,6 +26,10 @@ API is `v1alpha1`.
   `kubeneuron_agent_auth_live_gets_total`.
 - `install.sh --uninstall --delete-data` on the last installation now also empties the agent data directory `/var/lib/kube-neuron` on the nodes where this installation's agent Pods were running at the time of the uninstall, including the action journal and NVIDIA diagnostic bundles; it lists the nodes where this could not be confirmed. This cannot be undone: the action journal exists only on the node, so copy it first if you need the record.
 - Helm chart: `helm uninstall` now runs a check and stops when a KubeNeuron installation still exists; `--no-hooks` skips the check.
+- The workflow store is migrated (SQLite 0041, PostgreSQL 0032) to record
+  which notification channels accepted an approval request. Approval rounds
+  that are waiting for a decision at the upgrade are requested once more on
+  each configured channel.
 
 ### Added
 
@@ -52,6 +56,8 @@ API is `v1alpha1`.
 ### Changed
 
 - The restore guide now includes PostgreSQL restore steps and checks for automation pauses, approval rounds and node cordons after restoring either workflow store.
+
+- The description of the `KubeNeuronNotificationsDropped` alert, its runbook entry and the help text of `kubeneuron_notifications_dropped_total` no longer name a full queue as the only cause. They now say to check the `kind` label: `dead_letter` means delivery attempts failed, `event` or `approval_request` means the channel queue was full.
 
 - `kubeneuronctl status` says when the CLI and the controller are different versions and links to the release of the controller's version. It compares only what the controller returned; the CLI contacts nothing else.
 
@@ -86,6 +92,8 @@ API is `v1alpha1`.
 
 - Backups: the scheduled-backup CronJob template did not work as shipped. It named the controller of an installation called `fleet` but the token Secret of the default installation, so it made no backup for either without further edits. Its defaults now match the installer's defaults; for another installation, one documented `sed` command sets the name and the namespace together. The CronJob and the restore helper now set the fields the Pod Security `restricted` profile requires. The CronJob also sets fsGroup, so on volume types that apply it the Job's non-root user can write to a newly provisioned backup volume.
 - Backups: an interrupted download in the scheduled-backup CronJob could leave a truncated file under a dated name, and retention counted it as a copy. The Job now downloads to a temporary name and keeps the copy only after checking its length against the response and against the SQLite header; otherwise the Job fails and the existing copies stay as they were. Retention counts only complete copies. An incomplete copy left by an earlier version of the template is reported in the Job log by name and is not removed. The download time limit and the number of retries are set in the template (`MAX_TIME`, `RETRIES`).
+
+- Notifications: an approval request that a notification channel did not accept, for example during a channel outage longer than the delivery retries, was not sent again, so the round could expire without a request reaching that channel. The controller now records which channels accepted the request of the current round and sends it again with growing pauses to a channel that has not, also after a restart, until the round is decided or expires. A channel can receive the same request more than once: when it accepted the request but answered with an error or not in time, or when the controller did not record the delivery before it stopped. Each request sent again to a channel is counted in `kubeneuron_approval_request_redeliveries_total` and logged as a warning.
 
 - PagerDuty: an alert summary that reaches the Events v2 length limit is now cut between characters, so it no longer ends in a broken character. The approve and reject commands stay complete in the alert's custom details.
 

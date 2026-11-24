@@ -458,6 +458,7 @@ func TestDashboardQueriesUseRealLabels(t *testing.T) {
 // question at the console, not for watching. Adding a line is fine; adding one
 // without a reason is not.
 var notCharted = map[string]string{
+	"kubeneuron_approval_request_redeliveries_total":    "each resend also logs a warning naming the incident; a channel outage shows in kubeneuron_notifications_dropped_total, which is charted and alerted",
 	"kubeneuron_agent_auth_live_gets_total":             "upgrade and RBAC troubleshooting by resource after a cache sync warning; see reference-metrics.md",
 	"kubeneuron_cloud_health_reads_total":               "experimental and not validated against a live cloud: the outcome of each read of accelerator health from the cloud's monitoring, for ad hoc queries",
 	"kubeneuron_accelerator_health_ignored_nodes":       "experimental and not validated against a live GKE cluster: the nodes whose Cloud Monitoring TPU health is read and not acted on, by reason, for ad hoc queries",

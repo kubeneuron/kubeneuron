@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -509,6 +510,55 @@ func (q *Queries) UpdateIncident(ctx context.Context, inc *types.Incident) error
 	return nil
 }
 
+// MarkApprovalNotified records that channel accepted the request of
+// approval round epoch. It applies only while that round is still the
+// incident's current one and adds the channel once. It neither checks nor
+// bumps the version, because UpdateIncident never writes this column; two
+// channels reporting at once are ordered by comparing the stored value.
+func (q *Queries) MarkApprovalNotified(ctx context.Context, id string, epoch int, channel string) error {
+	for range 5 {
+		var current int
+		var raw string
+		err := q.db.QueryRowContext(ctx, `SELECT approval_epoch, approval_notified FROM incidents WHERE id=?`, id).Scan(&current, &raw)
+		if err == sql.ErrNoRows {
+			return store.ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if current != epoch {
+			return nil
+		}
+		var n types.ApprovalNotification
+		if raw != "" {
+			if err := json.Unmarshal([]byte(raw), &n); err != nil {
+				return fmt.Errorf("decode incident approval notification: %w", err)
+			}
+		}
+		if n.Epoch != epoch {
+			n = types.ApprovalNotification{Epoch: epoch}
+		}
+		if slices.Contains(n.Channels, channel) {
+			return nil
+		}
+		n.Channels = append(n.Channels, channel)
+		encoded, err := json.Marshal(n)
+		if err != nil {
+			return err
+		}
+		res, err := q.db.ExecContext(ctx,
+			`UPDATE incidents SET approval_notified=? WHERE id=? AND approval_epoch=? AND approval_notified=?`,
+			string(encoded), id, epoch, raw)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 1 {
+			return nil
+		}
+	}
+	return store.ErrConflict
+}
+
 func (q *Queries) GetIncident(ctx context.Context, id string) (*types.Incident, error) {
 	row := q.db.QueryRowContext(ctx, incidentSelect+` WHERE id=?`, id)
 	return scanIncident(row)
@@ -775,19 +825,19 @@ const incidentSelect = `
 	SELECT id, node, gpu_uuid, gpu_index, pci_addr, class, state, playbook,
 	       step_index, attempt, dry_run, signals_seen, remediation_slot_held, approval_epoch,
 	       vendor, opened_at, updated_at, state_changed_at, resolved_at, version, cloud_identity, successor,
-	       remove_first, accelerators, repair_node_uid, last_signal_at
+	       remove_first, accelerators, repair_node_uid, last_signal_at, approval_notified
 	FROM incidents`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
 func scanIncident(r rowScanner) (*types.Incident, error) {
 	var inc types.Incident
-	var class, state, vendor, opened, updated, stateChanged, identity, successor, removeFirst, accelerators, lastSignal string
+	var class, state, vendor, opened, updated, stateChanged, identity, successor, removeFirst, accelerators, lastSignal, notified string
 	var dryRun, slotHeld int
 	var resolved sql.NullString
 	err := r.Scan(&inc.ID, &inc.Target.Node, &inc.Target.GPUUUID, &inc.Target.GPUIndex,
 		&inc.Target.PCIAddr, &class, &state, &inc.Playbook, &inc.StepIndex, &inc.Attempt, &dryRun,
-		&inc.SignalSeen, &slotHeld, &inc.ApprovalEpoch, &vendor, &opened, &updated, &stateChanged, &resolved, &inc.Version, &identity, &successor, &removeFirst, &accelerators, &inc.RepairNodeUID, &lastSignal)
+		&inc.SignalSeen, &slotHeld, &inc.ApprovalEpoch, &vendor, &opened, &updated, &stateChanged, &resolved, &inc.Version, &identity, &successor, &removeFirst, &accelerators, &inc.RepairNodeUID, &lastSignal, &notified)
 	if err == sql.ErrNoRows {
 		return nil, store.ErrNotFound
 	}
@@ -805,6 +855,11 @@ func scanIncident(r rowScanner) (*types.Incident, error) {
 	}
 	if err := json.Unmarshal([]byte(accelerators), &inc.Accelerators); err != nil {
 		return nil, fmt.Errorf("decode incident accelerators: %w", err)
+	}
+	if notified != "" {
+		if err := json.Unmarshal([]byte(notified), &inc.ApprovalNotified); err != nil {
+			return nil, fmt.Errorf("decode incident approval notification: %w", err)
+		}
 	}
 	inc.Class = types.ProblemClass(class)
 	inc.State = types.IncidentState(state)

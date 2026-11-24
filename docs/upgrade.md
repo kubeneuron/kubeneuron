@@ -54,6 +54,11 @@ record remains available at `GET /api/v1/nodes/{node}`.
 The following migration (SQLite 0040, PostgreSQL 0031) indexes open remove-first
 records for recovery after a restart. The controller continues existing GKE plans.
 
+The next migration (SQLite 0041, PostgreSQL 0032) records which notification
+channels accepted the approval request of the current round. A round that is
+awaiting approval at the upgrade has no record yet, so each configured channel
+receives its approval request once more after the upgrade.
+
 To return to rc.2, stop writes and restore the pre-upgrade store backup before
 starting the rc.2 controller. It refuses databases with a newer schema.
 Restoring the backup also discards workflow changes made after the backup.

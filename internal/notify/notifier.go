@@ -59,6 +59,53 @@ type ApprovalContext struct {
 	Deadline      time.Time
 	ImpactSummary string
 	ImpactDigest  string
+	// Delivered, when set, is called with a channel's name once that channel
+	// has accepted the request: by Async after a successful attempt, and for
+	// a notifier that delivers synchronously when it returns no error. It may
+	// be called from another goroutine, once per channel, or never. The log
+	// is not a channel and never calls it.
+	Delivered func(channel string)
+	// Skip names channels that already accepted this round's request; Multi
+	// does not send it to them again.
+	Skip map[string]bool
+	// Sent, when set, is called with a channel's name when the request is
+	// handed to that channel: by Async when it queues it (not when the round
+	// is already in its queue), and before a synchronous notifier is called.
+	Sent func(channel string)
+}
+
+// deliveryReporter is implemented by a notifier that reports an approval
+// request's delivery itself, later, through ApprovalContext.Delivered.
+type deliveryReporter interface{ reportsDelivery() }
+
+// NamedChannel is implemented by a notifier that is one named channel.
+type NamedChannel interface{ ChannelName() string }
+
+// unnamedChannel names a channel notifier that does not name itself.
+const unnamedChannel = "notifier"
+
+func channelName(n Notifier) string {
+	if named, ok := n.(NamedChannel); ok && named.ChannelName() != "" {
+		return named.ChannelName()
+	}
+	return unnamedChannel
+}
+
+// Channels lists the channels an approval request through n is sent to: none
+// for the log alone, the name of each member but the log for Multi.
+func Channels(n Notifier) []string {
+	switch n := n.(type) {
+	case nil, *Log:
+		return nil
+	case Multi:
+		var out []string
+		for _, member := range n {
+			out = append(out, Channels(member)...)
+		}
+		return out
+	default:
+		return []string{channelName(n)}
+	}
 }
 
 // ContextualNotifier is the optional extension a Notifier implements to
@@ -70,15 +117,28 @@ type ContextualNotifier interface {
 }
 
 // RequestApprovalWithContext delivers an approval request with its context
-// through n when n supports it, and the plain request otherwise.
+// through n when n supports it, and the plain request otherwise. A notifier
+// that delivers synchronously has delivered when it returns no error, and
+// ac.Delivered is called then; one that reports delivery itself calls it.
 func RequestApprovalWithContext(ctx context.Context, n Notifier, inc *types.Incident, stepName string, ac ApprovalContext) error {
 	if n == nil {
 		return nil
 	}
-	if cn, ok := n.(ContextualNotifier); ok {
-		return cn.RequestApprovalWithContext(ctx, inc, stepName, ac)
+	_, later := n.(deliveryReporter)
+	_, isLog := n.(*Log)
+	if !later && !isLog && ac.Sent != nil {
+		ac.Sent(channelName(n))
 	}
-	return n.RequestApproval(ctx, inc, stepName)
+	var err error
+	if cn, ok := n.(ContextualNotifier); ok {
+		err = cn.RequestApprovalWithContext(ctx, inc, stepName, ac)
+	} else {
+		err = n.RequestApproval(ctx, inc, stepName)
+	}
+	if err == nil && !later && !isLog && ac.Delivered != nil {
+		ac.Delivered(channelName(n))
+	}
+	return err
 }
 
 // Log is the default Notifier: structured log lines only. Useful for dev
@@ -171,9 +231,14 @@ var _ ContextualNotifier = (Multi)(nil)
 
 // RequestApprovalWithContext implements ContextualNotifier: each member gets
 // the context when it can take it.
+//
+// Members named in ac.Skip are left out: they accepted this round already.
 func (m Multi) RequestApprovalWithContext(ctx context.Context, inc *types.Incident, stepName string, ac ApprovalContext) error {
 	var firstErr error
 	for _, n := range m {
+		if _, isLog := n.(*Log); !isLog && ac.Skip[channelName(n)] {
+			continue
+		}
 		if err := RequestApprovalWithContext(ctx, n, inc, stepName, ac); err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -181,7 +246,9 @@ func (m Multi) RequestApprovalWithContext(ctx context.Context, inc *types.Incide
 	return firstErr
 }
 
-// Notify implements Notifier.
+// reportsDelivery marks Multi as passing delivery reports on from its members.
+func (m Multi) reportsDelivery() {}
+
 func (m Multi) Notify(ctx context.Context, ev NotifyEvent) error {
 	var firstErr error
 	for _, n := range m {

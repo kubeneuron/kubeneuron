@@ -35,6 +35,7 @@ import (
 // Controller is the control-plane brain.
 type Controller struct {
 	trainingRoutes trainingRouteCache
+	approvalRetry  approvalRedelivery
 	store          store.Store
 	sink           store.EventSink
 	gate           *safety.Gate

@@ -339,13 +339,23 @@ var (
 		Help: "Rejected authentication attempts by API surface.",
 	}, []string{"api"})
 
-	// NotificationsDropped counts notifications lost to delivery-queue
-	// overflow, by kind (event, approval_request). Approval requests are
+	// NotificationsDropped counts notifications not delivered, by kind:
+	// dead_letter when delivery attempts were exhausted, event or
+	// approval_request when the channel queue was full. Approval requests are
 	// among the droppable items, so this must be alertable.
 	NotificationsDropped = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "kubeneuron_notifications_dropped_total",
-		Help: "Notifications dropped because the delivery queue was full.",
+		Help: "Notifications not delivered: delivery attempts exhausted (dead_letter) or channel queue full (event, approval_request).",
 	}, []string{"kind"})
+
+	// ApprovalRequestRedeliveries counts approval requests handed again to a
+	// configured notification channel that had not accepted the round's
+	// request yet, once per channel; a round still in a channel's queue is
+	// not handed again and not counted.
+	ApprovalRequestRedeliveries = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "kubeneuron_approval_request_redeliveries_total",
+		Help: "Approval requests sent again because a notification channel had not accepted them.",
+	})
 
 	// ReconcileSeconds observes one full reconcile pass over the live
 	// incident set. A growing tail warns of store contention or an incident

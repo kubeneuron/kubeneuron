@@ -889,7 +889,7 @@ operator-accepted controller stores. PostgreSQL is the HA choice: the DSN
 comes from a mounted Secret, the controller Deployment is stateless, and the
 store backend passes the same conformance suite as SQLite (see §2.5 for the
 honest scope of what that parity does and does not prove). Migration heads
-travel in lockstep (sqlite 0040 / postgres 0031, including the indexed remove-first delete intent, the observed deletion time of registered nodes, node inventory source, incident-linked training progress and checkpoint reports, the remove-first plan of an incident, the accelerator devices an incident covered when it opened, per-node repair ownership, and when a signal last joined an incident).
+travel in lockstep (sqlite 0041 / postgres 0032, including which notification channels accepted the approval request of the current round, the indexed remove-first delete intent, the observed deletion time of registered nodes, node inventory source, incident-linked training progress and checkpoint reports, the remove-first plan of an incident, the accelerator devices an incident covered when it opened, per-node repair ownership, and when a signal last joined an incident).
 
 The operator provisions a `ReadWriteOnce` claim for SQLite, defaulting to
 `5Gi`. Reconciliation preserves API-selected/bound fields, permits only

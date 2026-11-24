@@ -5,6 +5,8 @@ package notify
 import (
 	"context"
 	"log/slog"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
@@ -30,9 +32,17 @@ const (
 // the oldest-style behavior is to drop with a counted log line — the audit
 // trail, not Slack, is the system of record.
 type Async struct {
-	inner Notifier
-	log   *slog.Logger
-	queue chan asyncItem
+	// Channel names this channel in delivery reports (slack, webhook,
+	// pagerduty).
+	Channel string
+	inner   Notifier
+	log     *slog.Logger
+	queue   chan asyncItem
+	// pending holds the approval rounds queued or being retried here, so a
+	// request sent again while the first is still in the queue is not
+	// queued twice.
+	mu      sync.Mutex
+	pending map[string]bool
 	// sleep is time.Sleep in production; tests inject a recorder. It must
 	// remain interruptible by ctx in the worker loop.
 	sleep func(ctx context.Context, d time.Duration)
@@ -52,7 +62,7 @@ type incidentApproval struct {
 // NewAsync wraps inner; Start must be called to begin delivery.
 func NewAsync(inner Notifier, log *slog.Logger) *Async {
 	return &Async{
-		inner: inner, log: log, queue: make(chan asyncItem, asyncQueueSize),
+		inner: inner, log: log, queue: make(chan asyncItem, asyncQueueSize), pending: map[string]bool{},
 		sleep: func(ctx context.Context, d time.Duration) {
 			t := time.NewTimer(d)
 			defer t.Stop()
@@ -83,6 +93,9 @@ func (a *Async) Start(ctx context.Context) {
 // new items are dropped with a metric, and this worker keeps the channel's
 // ordering guarantees instead of reordering around failures.
 func (a *Async) deliver(ctx context.Context, item asyncItem) {
+	if item.incident != nil {
+		defer a.release(item.incident.incident)
+	}
 	backoff := asyncFirstBackoff
 	var err error
 	for attempt := 1; attempt <= asyncMaxAttempts; attempt++ {
@@ -90,10 +103,16 @@ func (a *Async) deliver(ctx context.Context, item asyncItem) {
 		if item.event != nil {
 			err = a.inner.Notify(sendCtx, *item.event)
 		} else if item.incident != nil {
-			err = RequestApprovalWithContext(sendCtx, a.inner, item.incident.incident, item.incident.stepName, item.incident.context)
+			ac := item.incident.context
+			ac.Delivered = nil // reported below, once, after the attempt that succeeded
+			ac.Sent = nil      // reported when queued
+			err = RequestApprovalWithContext(sendCtx, a.inner, item.incident.incident, item.incident.stepName, ac)
 		}
 		cancel()
 		if err == nil {
+			if item.incident != nil && item.incident.context.Delivered != nil {
+				item.incident.context.Delivered(a.ChannelName())
+			}
 			return
 		}
 		// The bundled notifiers already redact; an inner notifier written
@@ -143,12 +162,58 @@ func (a *Async) RequestApproval(ctx context.Context, inc *types.Incident, stepNa
 
 var _ ContextualNotifier = (*Async)(nil)
 
+func roundKey(inc *types.Incident) string {
+	if inc == nil {
+		return ""
+	}
+	return inc.ID + "#" + strconv.Itoa(inc.ApprovalEpoch)
+}
+
+func (a *Async) claim(inc *types.Incident) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	key := roundKey(inc)
+	if key == "" {
+		return true
+	}
+	if a.pending[key] {
+		return false
+	}
+	a.pending[key] = true
+	return true
+}
+
+func (a *Async) release(inc *types.Incident) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.pending, roundKey(inc))
+}
+
+// ChannelName implements NamedChannel.
+func (a *Async) ChannelName() string {
+	if a.Channel != "" {
+		return a.Channel
+	}
+	return channelName(a.inner)
+}
+
+// reportsDelivery marks Async as reporting an approval request's delivery
+// after its own attempts, not when it is queued.
+func (a *Async) reportsDelivery() {}
+
 // RequestApprovalWithContext implements ContextualNotifier: the context rides
 // along in the queue item.
 func (a *Async) RequestApprovalWithContext(_ context.Context, inc *types.Incident, stepName string, ac ApprovalContext) error {
+	if !a.claim(inc) {
+		return nil // this round is still queued or being retried here
+	}
 	select {
 	case a.queue <- asyncItem{incident: &incidentApproval{incident: inc.Clone(), stepName: stepName, context: ac}}:
+		if ac.Sent != nil {
+			ac.Sent(a.ChannelName())
+		}
 	default:
+		a.release(inc)
 		metrics.NotificationsDropped.WithLabelValues("approval_request").Inc()
 		a.log.Warn("notification queue full, dropping approval request", "incident", incidentID(inc))
 	}

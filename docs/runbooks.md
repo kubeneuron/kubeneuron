@@ -317,10 +317,12 @@ storm.
 
 ### KubeNeuronNotificationsDropped
 
-The notification delivery queue overflowed; **approval requests may be
-among the lost messages**. Check Slack/webhook reachability. Pending
-approvals are still visible via `kubeneuronctl incidents --state AWAITING_APPROVAL`
-— nothing is lost except the ping.
+Check the kind label. A dead_letter means delivery attempts failed; event or
+approval_request means the channel queue was full. **Approval requests may be
+among the lost messages.** Check Slack/webhook/PagerDuty reachability. An
+approval request that a channel did not accept is sent again while the round
+waits for a decision; lifecycle notifications are not sent again. Pending
+approvals are visible via `kubeneuronctl incidents --state AWAITING_APPROVAL`.
 
 ### KubeNeuronAgentSpoolBacklog
 

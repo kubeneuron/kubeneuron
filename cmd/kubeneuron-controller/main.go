@@ -357,8 +357,9 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 	// Each external channel gets its own async worker with retry/backoff and
 	// dead-lettering: one channel's outage never stalls another, and neither
 	// can ever stall ingestion or the reconcile walk.
-	addAsync := func(n notify.Notifier) {
+	addAsync := func(channel string, n notify.Notifier) {
 		async := notify.NewAsync(n, log)
+		async.Channel = channel
 		async.Start(ctx)
 		notifier = append(notifier, async)
 	}
@@ -367,7 +368,7 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 		if err != nil {
 			return fmt.Errorf("slack webhook: %w", err)
 		}
-		addAsync(slack.New(webhookURL))
+		addAsync("slack", slack.New(webhookURL))
 	}
 	if notifyCfg.webhookURL != "" {
 		url, err := readTokenFile(notifyCfg.webhookURL)
@@ -380,14 +381,14 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 				return fmt.Errorf("notification webhook token: %w", err)
 			}
 		}
-		addAsync(webhook.New(url, token))
+		addAsync("webhook", webhook.New(url, token))
 	}
 	if notifyCfg.pagerdutyRoutingKey != "" {
 		key, err := readTokenFile(notifyCfg.pagerdutyRoutingKey)
 		if err != nil {
 			return fmt.Errorf("pagerduty routing key: %w", err)
 		}
-		addAsync(pagerduty.New(key))
+		addAsync("pagerduty", pagerduty.New(key))
 	}
 	ctrl := controller.New(st, st, engine, gate, flap, plat, act, notifier, log)
 

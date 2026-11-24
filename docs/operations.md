@@ -62,12 +62,29 @@ Every external channel (Slack, generic webhook, PagerDuty) runs behind its
 own asynchronous queue so an outage can never stall ingestion or the
 reconcile walk. Failed deliveries are retried 4 times with exponential
 backoff (~21 s total); after the final failure the payload is
-**dead-lettered to the controller log** (`notification dead-lettered after
-retries`, full message included for manual replay) and
-`kubeneuron_notifications_dropped_total{reason="dead_letter"}` increments —
+**dead-lettered to the controller log** and
+`kubeneuron_notifications_dropped_total{kind="dead_letter"}` increments —
 the `KubeNeuronNotificationsDropped` alert covers both queue overflow and
-dead-letters. The audit trail, not any notification channel, remains the
-system of record.
+dead-letters. For an event the log line (`notification dead-lettered after
+retries`) includes the message, for manual replay. For an approval request
+the line (`approval request dead-lettered after retries`) names only the
+incident and the step; the approve and reject commands are in
+`kubeneuronctl incidents show`. The audit trail, not any notification
+channel, remains the system of record.
+
+An approval request is sent to each configured channel until that channel
+accepts it, while the round waits for a decision. The controller records in
+the workflow store which channels accepted the request of the current round.
+A channel that has not accepted it gets it again with growing pauses, also
+after a controller restart, until it accepts it or the round is decided or
+expires. A channel can receive the same request more than once: when it
+accepted the request but answered with an error or not in time, or when the
+controller did not record the delivery before it stopped. Each
+request sent again to a channel increments
+`kubeneuron_approval_request_redeliveries_total` and logs a warning; a resend
+that finds the request still in the channel's delivery queue is not sent or
+counted. A channel added while a round waits receives its request; a
+channel removed from the configuration no longer counts.
 
 PagerDuty mapping: one KubeNeuron incident = one PagerDuty alert
 (`dedup_key` = incident ID). `needs_human`, `expired`, and approval

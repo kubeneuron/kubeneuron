@@ -342,6 +342,12 @@ type Incident struct {
 	Version int `json:"resource_version"`
 	// RepairNodeUID pins the Kubernetes inventory incarnation for repair ownership.
 	RepairNodeUID string `json:"-"`
+	// ApprovalNotified names the notification channels that accepted the
+	// request of an approval round. While a configured channel is missing
+	// for the current round, the controller sends the request to it again.
+	// Only the store's MarkApprovalNotified writes it; UpdateIncident leaves
+	// it alone, so a writer holding an older copy cannot unmark a channel.
+	ApprovalNotified ApprovalNotification `json:"-"`
 	// CloudIdentity is the original target pinned when the incident opens.
 	// Nil on legacy/unidentified incidents; never infer authorization from it.
 	CloudIdentity *cloud.NodeIdentity `json:"cloud_identity,omitempty"`
@@ -498,6 +504,23 @@ func (s *SuccessorRecord) Clone() *SuccessorRecord {
 	return &c
 }
 
+// ApprovalNotification is which channels accepted round Epoch's request.
+type ApprovalNotification struct {
+	Epoch    int      `json:"epoch"`
+	Channels []string `json:"channels"`
+}
+
+// Accepted reports the channels that accepted round epoch's request.
+func (n ApprovalNotification) Accepted(epoch int) map[string]bool {
+	out := map[string]bool{}
+	if n.Epoch == epoch {
+		for _, ch := range n.Channels {
+			out[ch] = true
+		}
+	}
+	return out
+}
+
 // Clone returns a deep copy. Use it whenever an incident crosses a goroutine
 // boundary (for example async notification queues) so the reconcile loop can
 // keep mutating its copy without racing the reader.
@@ -513,6 +536,7 @@ func (i *Incident) Clone() *Incident {
 	c.Successor = i.Successor.Clone()
 	c.RemoveFirst = i.RemoveFirst.Clone()
 	c.Accelerators = slices.Clone(i.Accelerators)
+	c.ApprovalNotified.Channels = slices.Clone(i.ApprovalNotified.Channels)
 	if i.ResolvedAt != nil {
 		t := *i.ResolvedAt
 		c.ResolvedAt = &t

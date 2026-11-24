@@ -612,6 +612,8 @@ func (c *Controller) parkForApproval(ctx context.Context, inc *types.Incident, s
 	preview := c.previewImpact(ctx, inc, "computed at park")
 	ac := approvalContext(preview)
 	ac.Deadline = inc.StateChangedAt.Add(c.runtimeConfig(ctx).ApprovalTTL)
+	ac.Delivered = c.approvalDelivered(inc.ID, inc.ApprovalEpoch)
+	c.approvalRetry.sent(inc.ID, inc.ApprovalEpoch, ac.Deadline, time.Now())
 	err := notify.RequestApprovalWithContext(ctx, c.notifier, inc, step.Name, ac)
 	advised.Wait()
 	return err
@@ -730,6 +732,7 @@ func (c *Controller) resumeAwaitingApproval(ctx context.Context, inc *types.Inci
 	if time.Since(inc.StateChangedAt) > ttl {
 		return c.expireApproval(ctx, inc)
 	}
+	c.redeliverApprovalRequest(ctx, inc, inc.StateChangedAt.Add(ttl))
 	return nil
 }
 
