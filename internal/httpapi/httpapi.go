@@ -369,7 +369,19 @@ func (s *Server) requestIsSecure(r *http.Request) bool {
 //	GET    /, /ui/                         embedded control panel
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
+	s.registerPublicRoutes(mux)
+	return mux
+}
 
+// routeRegistrar is the part of *http.ServeMux the public routes need. Tests
+// register onto a recorder through it to enumerate every public route.
+type routeRegistrar interface {
+	routeMux
+	Handle(pattern string, handler http.Handler)
+}
+
+// registerPublicRoutes wires every route Routes serves.
+func (s *Server) registerPublicRoutes(mux routeRegistrar) {
 	mux.Handle("POST /api/v1/webhooks/alertmanager", s.requireLeader(http.HandlerFunc(s.handleAlertmanager)))
 	mux.Handle("POST /api/v1/webhooks/vmalert/api/v2/alerts", s.requireLeader(http.HandlerFunc(s.handleVMAlert)))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -403,8 +415,6 @@ func (s *Server) Routes() http.Handler {
 	// TODO(phase-2): role-based auth (viewer/operator/admin) instead of the
 	// single operator token; SSE stream, VM proxy, config versioning, Web UI
 	// static serving via go:embed from web/dist.
-
-	return mux
 }
 
 // AgentRoutes returns only the routes used by node agents. Every route,
@@ -412,6 +422,13 @@ func (s *Server) Routes() http.Handler {
 // listener and a successfully authenticated Pod-bound token.
 func (s *Server) AgentRoutes(authenticator AgentAuthenticator) http.Handler {
 	mux := http.NewServeMux()
+	s.registerAgentRoutes(mux)
+	return s.requireLeader(authenticateAgent(authenticator, mux))
+}
+
+// registerAgentRoutes wires the routes AgentRoutes serves behind agent
+// authentication.
+func (s *Server) registerAgentRoutes(mux routeMux) {
 	mux.HandleFunc("POST /api/v1/events", s.handleAgentEvent)
 	mux.HandleFunc("GET "+types.AgentRegistrationPath, s.handleRegistrationCapability)
 	mux.HandleFunc("POST "+types.AgentRegistrationPath, s.handleRegister)
@@ -425,7 +442,6 @@ func (s *Server) AgentRoutes(authenticator AgentAuthenticator) http.Handler {
 	// hold actions rather than risking an unconditionally accepted result.
 	mux.HandleFunc("GET "+types.AgentActionLeasePath, s.handleNextAction)
 	mux.HandleFunc("POST "+types.AgentActionLeasePath+"/{id}/result", s.handleActionResult)
-	return s.requireLeader(authenticateAgent(authenticator, mux))
 }
 
 func authenticateAgent(authenticator AgentAuthenticator, next http.Handler) http.Handler {
