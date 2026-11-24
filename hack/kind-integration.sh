@@ -103,8 +103,8 @@ BUILD_IMAGES=${BUILD_IMAGES:-1}
 # the shared cluster, CRD and operator setup); all: both, one after the other.
 INTEGRATION_SUITE=${INTEGRATION_SUITE:-all}
 case $INTEGRATION_SUITE in
-main | installer | all) ;;
-*) echo "integration: INTEGRATION_SUITE must be main, installer or all" >&2; exit 2 ;;
+main | functional | tls | installer | all) ;;
+*) echo "integration: INTEGRATION_SUITE must be main, functional, tls, installer or all" >&2; exit 2 ;;
 esac
 WORKER_NODES=${WORKER_NODES:-2}
 TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-240}
@@ -4538,7 +4538,7 @@ assert_operator_rbac
 # The installer suite: its lifecycle and the Managed metrics path it writes,
 # on the same cluster setup, then stop. CI runs it as its own job beside the
 # rest, which the two would push past the job's time limit.
-if [[ $INTEGRATION_SUITE != main ]]; then
+if [[ $INTEGRATION_SUITE == installer || $INTEGRATION_SUITE == all ]]; then
 	INSTALL_TEST_NAME="${ROOT_NAME}-retention" KUBECTL_BIN="$KUBECTL_BIN" \
 		CONTROLLER_IMAGE="$CONTROLLER_IMAGE" AGENT_IMAGE="$AGENT_IMAGE" \
 		bash "$REPO_ROOT/hack/test-install-retention.sh"
@@ -4619,17 +4619,23 @@ note "acknowledged explicit-default reconcile left digest and Deployment generat
 wait_agent_log 'controller registration acknowledged'
 exercise_agent_bad_certificate_readiness
 exercise_agent_authentication
-exercise_runtime_contract_lifecycle
-wait_root_condition True RuntimeAvailable
-assert_runtime_ready
-exercise_controller_restart_mid_playbook
-exercise_incident_evidence
-exercise_cloud_interruption
-exercise_accelerator_health
-exercise_real_cordon_and_uncordon
-exercise_workload_safe_recovery
-exercise_backup_restore
-exercise_backup_cronjob
+if [[ $INTEGRATION_SUITE != tls ]]; then
+	exercise_runtime_contract_lifecycle
+	wait_root_condition True RuntimeAvailable
+	assert_runtime_ready
+	exercise_controller_restart_mid_playbook
+	exercise_incident_evidence
+	exercise_cloud_interruption
+	exercise_accelerator_health
+	exercise_real_cordon_and_uncordon
+	exercise_workload_safe_recovery
+	exercise_backup_restore
+	exercise_backup_cronjob
+fi
+if [[ $INTEGRATION_SUITE == functional ]]; then
+	note "PASS: functional scenarios through SQLite restore"
+	exit 0
+fi
 wait_root_condition True RuntimeAvailable
 assert_runtime_ready
 exercise_routine_tls_rotation
@@ -4732,6 +4738,11 @@ agent_logs=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" logs \
 	daemonset/"${ROOT_NAME}-agent" --all-containers --tail=100 2>&1 || true)
 if grep -Fq 'real NVML driver not wired yet; using fake driver (skeleton)' <<<"$agent_logs"; then
 	note "agent explicitly reports its fake NVML skeleton"
+fi
+
+if [[ $INTEGRATION_SUITE == tls ]]; then
+	note "PASS: TLS rotation and recovery, registration outage and ownership checks"
+	exit 0
 fi
 
 	note "PASS: 99 CEL checks (including the destructive-execution admission gate, the checkpoint-coordination, advisory, group and impact-preview bounds, and the GPUAutonomyPlan envelope rules), scoped RBAC, mTLS plus Pod/node identity rejection, authenticated public API and Alertmanager webhook, manual immutable/versioned routine TLS rotation, explicit dual-leaf emergency recovery, stale-state/plan rejection, failed-leaf and failed-contraction rollback, fresh registration proof, durable readiness loss/recovery, 11 owners, ownership collision/non-adoption/recovery, and acknowledged no-op reconciliation, plus a controller restart mid-playbook with durable approval state and no re-executed step, and a REAL cordon with the janitor's uncordon on an armed worker, plus the workload-safe recovery phases on real Pods: advisory at park and its withdrawal, a durable impact preview the approve must carry, a Phase 1 request reaching a group peer on another node, a REAL drain after acknowledgement, and a dry-run park that patches nothing"
