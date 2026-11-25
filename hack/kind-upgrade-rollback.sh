@@ -59,10 +59,14 @@ set -Eeuo pipefail
 #      psql), operator back — and prove BASELINE serves the baseline
 #      incident with its audit, an empty qualification list (the rows HEAD
 #      wrote after the snapshot are gone, which is what a restore means),
-#      both coverage routes, and a read-only role on pods;
+#      both coverage routes, and a read-only role on pods; HEAD's two
+#      namespaced Roles remain and the controller's ClusterRole no longer
+#      reads persistent volume claims or volumes;
 #   6. upgrade to HEAD again on the restored store, prove the migration runs
 #      again (the baseline incident is still served, the list is still
-#      empty), drive the whole lifecycle a second time to
+#      empty), prove the controller paused automation because the restored
+#      store is older than the copy on its Lease and resume it, drive the
+#      whole lifecycle a second time to
 #      ReadyForApproval with a fresh four-event audit chain, and extend that
 #      chain with one more observation.
 #
@@ -705,6 +709,43 @@ api_code() {
 	api "$store" -o "$out" -w '%{http_code}' "$@"
 }
 qual_url() { printf 'http://127.0.0.1:%s/api/v1/runtime-contract-qualifications' "$public_port"; }
+pause_url() { printf 'http://127.0.0.1:%s/api/v1/pause' "$public_port"; }
+
+# assert_pause waits up to a minute for GET /api/v1/pause to answer exactly
+# the wanted JSON: the controller checks the store generation when it starts
+# or becomes leader, which can finish after the API answers.
+assert_pause() {
+	local store=$1 want=$2 label=$3 got=
+	for _ in $(seq 60); do
+		got=$(api "$store" "$(pause_url)" | "$JQ_BIN" -c . 2>/dev/null || true)
+		[[ $got == "$want" ]] && {
+			note "[$store] $label: GET /api/v1/pause answers $got"
+			return
+		}
+		sleep 1
+	done
+	die "[$store] $label: GET /api/v1/pause answers '$got', want $want"
+}
+
+# assert_rollback_rbac checks what the BASELINE operator leaves of HEAD's
+# access: the two namespaced Roles HEAD added remain, and the controller's
+# ClusterRole no longer reads persistent volume claims or persistent volumes.
+assert_rollback_rbac() {
+	local store=$1 root ns role
+	root=$(root_name "$store")
+	ns=$(store_ns "$store")
+	for role in "$root-runtime-reader" "$root-agent-auth-reader"; do
+		"$KUBECTL_BIN" -n "$ns" get role "$role" >/dev/null 2>&1 ||
+			die "[$store] Role $role is gone after the rollback, want it kept"
+		"$KUBECTL_BIN" -n "$ns" get rolebinding "$role" >/dev/null 2>&1 ||
+			die "[$store] RoleBinding $role is gone after the rollback, want it kept"
+	done
+	if "$KUBECTL_BIN" get clusterrole "$root-controller" -o json |
+		"$JQ_BIN" -e '[.rules[]?.resources[]?] | any(. == "persistentvolumeclaims" or . == "persistentvolumes")' >/dev/null; then
+		die "[$store] ClusterRole $root-controller still reads persistent volume claims or volumes after the rollback"
+	fi
+	note "[$store] after the rollback: Roles $root-runtime-reader and $root-agent-auth-reader kept, no volume read in ClusterRole $root-controller"
+}
 
 coverage_url() { printf 'http://127.0.0.1:%s/api/v1/nodes/%s/runtime-contract?vendor=nvidia' "$public_port" "$1"; }
 fleet_coverage_url() { printf 'http://127.0.0.1:%s/api/v1/runtime-contracts/coverage?vendor=nvidia' "$public_port"; }
@@ -1195,6 +1236,8 @@ for store in $STORES; do
 	note "[$store] runtime contract lifecycle ($LIFECYCLE_PASS pass): profile $profile_name selects $node via ${STORE_NODE_LABEL}=${store}"
 	start_port_forward "$store"
 	if [[ $LIFECYCLE_PASS == first ]]; then
+	# The upgrade from BASELINE finds no copy of the store generation.
+	assert_pause "$store" '{"paused":false}' "first upgrade"
 	digest_before=$("$KUBECTL_BIN" get kubeneuron "$root" -o jsonpath='{.status.configDigest}')
 	[[ -n $digest_before ]] || die "[$store] root $root has no compiled configDigest before the profile"
 	cat >"$work_dir/profile-$store.yaml" <<EOF
@@ -1536,6 +1579,7 @@ for store in $STORES; do
 	# operator reconciles them: the BASELINE controller must be running
 	# under exactly the read-only pods grant it was built for.
 	assert_pod_verbs "$store" "get,list,watch" "after restore and image rollback"
+	assert_rollback_rbac "$store"
 	logs=$("$KUBECTL_BIN" -n "$(store_ns "$store")" logs "pod/$(leader_pod "$store")" --tail=-1 2>&1)
 	if grep -Eiq 'panic|fatal' <<<"$logs"; then
 		die "[$store] restored controller logs contain a panic/fatal line"
@@ -1551,6 +1595,12 @@ upgrade_to_head "re-upgrade"
 for store in $STORES; do
 	start_port_forward "$store"
 	note "[$store] re-upgraded: the migration ran again on the restored store"
+	# The restored store has no generation while the Lease keeps the copy the
+	# first upgrade wrote, so the controller pauses automation by itself.
+	assert_pause "$store" '{"paused":true,"store_older":true}' "re-upgrade on the restored store"
+	code=$(api_code "$store" /dev/null -X DELETE "$(pause_url)?actor=rehearsal")
+	[[ $code == 204 ]] || die "[$store] resume after the re-upgrade answered $code, want 204"
+	assert_pause "$store" '{"paused":false}' "resume after the re-upgrade"
 	survived=$(api "$store" "http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id[$store]}" |
 		"$JQ_BIN" --arg id "${incident_id[$store]}" '.incident.id == $id')
 	[[ $survived == true ]] || die "[$store] baseline incident ${incident_id[$store]} is gone after re-upgrade"
