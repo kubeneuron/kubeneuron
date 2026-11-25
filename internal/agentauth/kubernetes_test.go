@@ -519,8 +519,14 @@ func TestRepeatedReviewedToken(t *testing.T) {
 			if scenario == "repeat" && len(f.client.Actions()) != 0 {
 				t.Fatalf("cache hit made API calls: %v", f.client.Actions())
 			}
+			// A token whose Pod is gone is invalid, not merely unauthorized:
+			// the cached review is dropped and the API answers again.
+			var statusErr httpapi.HTTPStatusError
+			if scenario != "repeat" && (!errors.As(err, &statusErr) || statusErr.HTTPStatus() != http.StatusUnauthorized) {
+				t.Fatalf("got %v, want 401", err)
+			}
 			want := 1
-			if scenario == "expired review" || scenario == "changed audience" {
+			if scenario != "repeat" && scenario != "missing TLS" {
 				want = 2
 			}
 			if reviews != want {

@@ -8,6 +8,7 @@ package agentauth
 import (
 	"crypto/sha256"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"k8s.io/utils/lru"
 	"net/http"
@@ -116,13 +117,30 @@ func (a *Authenticator) AuthenticateAgent(r *http.Request) (httpapi.AgentPrincip
 
 	started := a.now()
 	key := reviewKey{tokenDigest: sha256.Sum256([]byte(token)), audience: a.cfg.Audience}
-	binding, hit := a.reviews.get(key, started)
-	if !hit {
-		binding, err = a.reviewBinding(r, token)
-		if err != nil {
-			return httpapi.AgentPrincipal{}, err
+	if binding, hit := a.reviews.get(key, started); hit {
+		principal, err := a.principal(r, binding)
+		if !isForbidden(err) {
+			return principal, err
 		}
+		// The objects no longer match the cached review, so the token may
+		// have stopped being valid: ask the API again rather than answer
+		// from the cache.
+		a.reviews.remove(key)
 	}
+	binding, err := a.reviewBinding(r, token)
+	if err != nil {
+		return httpapi.AgentPrincipal{}, err
+	}
+	principal, err := a.principal(r, binding)
+	if err != nil {
+		return httpapi.AgentPrincipal{}, err
+	}
+	a.reviews.admit(key, token, binding, started, a.now())
+	return principal, nil
+}
+
+// principal checks a reviewed binding against the current Kubernetes objects.
+func (a *Authenticator) principal(r *http.Request, binding reviewedBinding) (httpapi.AgentPrincipal, error) {
 	podName, podUID := binding.podName, binding.podUID
 
 	serviceAccount, err := a.objects.serviceAccounts.lookup(r.Context(), "serviceaccounts", a.cfg.ServiceAccount, a.client.CoreV1().ServiceAccounts(a.cfg.Namespace).Get)
@@ -185,9 +203,6 @@ func (a *Authenticator) AuthenticateAgent(r *http.Request) (httpapi.AgentPrincip
 		return httpapi.AgentPrincipal{}, forbidden("Node is terminating")
 	}
 
-	if !hit {
-		a.reviews.admit(key, token, binding, started, a.now())
-	}
 	return httpapi.AgentPrincipal{
 		Namespace:      a.cfg.Namespace,
 		ServiceAccount: a.cfg.ServiceAccount,
@@ -312,6 +327,11 @@ func (e *authError) Error() string {
 		return e.msg + ": " + e.cause.Error()
 	}
 	return e.msg
+}
+
+func isForbidden(err error) bool {
+	var authErr *authError
+	return errors.As(err, &authErr) && authErr.status == http.StatusForbidden
 }
 
 func (e *authError) Unwrap() error   { return e.cause }

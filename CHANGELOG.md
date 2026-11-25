@@ -18,7 +18,10 @@ API is `v1alpha1`.
   against its cached view of the cluster, which follows the API through a
   watch. So an agent's access ends when the controller sees the Pod's deletion
   through the watch, or, if the watch lags, when the next token review is
-  rejected by the Kubernetes API.
+  rejected by the Kubernetes API. When the check of the Pod and ServiceAccount
+  fails, the controller discards the reused review and asks the Kubernetes API
+  again, so a token whose Pod is gone is answered with 401, as in
+  v1.0.0-rc.1.
 - The operator grants the controller a Role with list and watch access to
   ServiceAccounts and DaemonSets in the installation namespace. Until the Role
   is available, the controller uses live API reads for these resources. It logs

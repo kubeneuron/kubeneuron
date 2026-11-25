@@ -45,6 +45,8 @@ func (c positiveReviews) get(key reviewKey, now time.Time) (reviewedBinding, boo
 	return reviewedBinding{}, false
 }
 
+func (c positiveReviews) remove(key reviewKey) { c.entries.Remove(key) }
+
 // admit is called only after the API authenticated these exact token bytes.
 // JWT claims can shorten the cache lifetime but cannot establish identity.
 func (c positiveReviews) admit(key reviewKey, token string, binding reviewedBinding, started, now time.Time) {
