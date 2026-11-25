@@ -45,6 +45,9 @@ type pauseSnapshot struct {
 	Paused    bool      `json:"paused"`
 	Actor     string    `json:"actor,omitempty"`
 	ChangedAt time.Time `json:"changed_at,omitempty"`
+	// StoreOlder says the controller paused because the store is older than
+	// the one it last used. An earlier version ignores it and keeps the pause.
+	StoreOlder bool `json:"store_older,omitempty"`
 }
 
 // RestoreAndPersist loads previously stored cooldowns into the gate and
@@ -81,10 +84,11 @@ func (g *Gate) RestoreAndPersist(ctx context.Context, store StateStore, log *slo
 			return fmt.Errorf("decode persisted pause: %w", err)
 		}
 		g.paused, g.pauseActor, g.pauseChangedAt = pause.Paused, pause.Actor, pause.ChangedAt
+		g.storeOlder = pause.Paused && pause.StoreOlder
 	}
 	g.store, g.storeLog = store, log
 	g.persistLocked(persistCtx)
-	if err := g.persistPauseLocked(persistCtx, g.paused, g.pauseActor, g.pauseChangedAt); err != nil && g.storeLog != nil {
+	if err := g.persistPauseLocked(persistCtx, g.pauseLocked()); err != nil && g.storeLog != nil {
 		g.storeLog.Warn("persisting restored global pause failed; state survives in memory only", "err", err)
 	}
 	return nil
@@ -107,15 +111,23 @@ func (g *Gate) persistLocked(ctx context.Context) {
 // persistPauseLocked writes an explicit pause replacement. Called with g.mu
 // held. Unlike cooldown persistence, its error reaches SetPaused so the API
 // never acknowledges a pause that cannot survive failover.
-func (g *Gate) persistPauseLocked(ctx context.Context, paused bool, actor string, changedAt time.Time) error {
+func (g *Gate) persistPauseLocked(ctx context.Context, pause pauseSnapshot) error {
 	if g.store == nil {
 		return fmt.Errorf("global pause persistence is unavailable")
 	}
-	payload, err := json.Marshal(pauseSnapshot{Paused: paused, Actor: actor, ChangedAt: changedAt})
+	payload, err := json.Marshal(pause)
 	if err != nil {
 		return err
 	}
 	return g.store.SaveSafetyState(ctx, stateKindPause, payload)
+}
+
+func (g *Gate) pauseLocked() pauseSnapshot {
+	return pauseSnapshot{Paused: g.paused, Actor: g.pauseActor, ChangedAt: g.pauseChangedAt, StoreOlder: g.storeOlder}
+}
+
+func (g *Gate) setPauseLocked(pause pauseSnapshot) {
+	g.paused, g.pauseActor, g.pauseChangedAt, g.storeOlder = pause.Paused, pause.Actor, pause.ChangedAt, pause.StoreOlder
 }
 
 // flapSnapshot is the persisted form of FlapDetector state.

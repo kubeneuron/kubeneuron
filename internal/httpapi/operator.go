@@ -493,6 +493,9 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "backup failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if s.backupTaken != nil {
+		s.backupTaken(r.Context())
+	}
 	f, err := os.Open(tmpPath)
 	if err != nil {
 		http.Error(w, "backup failed: "+err.Error(), http.StatusInternalServerError)
@@ -1129,8 +1132,19 @@ func (s *Server) handleTargets(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, groups)
 }
 
+// StoreOlderReporter is the optional extension that says whether the pause
+// includes the controller's own, made because the store is older than the
+// one it last used.
+type StoreOlderReporter interface {
+	PausedForOlderStore() bool
+}
+
 func (s *Server) handleGetPause(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, map[string]bool{"paused": s.operator.Paused()})
+	body := map[string]bool{"paused": s.operator.Paused()}
+	if reporter, ok := s.operator.(StoreOlderReporter); ok && reporter.PausedForOlderStore() {
+		body["store_older"] = true
+	}
+	writeJSON(w, body)
 }
 
 func (s *Server) handleSetPause(paused bool) http.HandlerFunc {

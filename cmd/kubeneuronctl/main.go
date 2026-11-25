@@ -113,6 +113,10 @@ func readPassword(cmd *cobra.Command) ([]byte, error) {
 // cannot choose the URL the CLI prints.
 var releaseTag = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$`)
 
+// storeOlderStatus follows "automation paused: true" when the controller
+// paused because the store is older than the one it last used.
+const storeOlderStatus = "Automation was paused by the controller: the workflow store is older than the one this controller last used (restored from a backup or replaced). A pause and approval decisions made after that point are not in this store. Check the incidents waiting for approval and the cordons on your nodes: kubeneuronctl incidents --state AWAITING_APPROVAL\nWhen you have checked them, resume automation: kubeneuronctl resume"
+
 // versionDiffersLine says when this CLI and the controller report different
 // versions. It compares only what the controller returned; a development
 // build of the CLI, or a controller that reports no version, says nothing.
@@ -153,7 +157,8 @@ func cmdStatus() *cobra.Command {
 			return err
 		}
 		var pause struct {
-			Paused bool `json:"paused"`
+			Paused     bool `json:"paused"`
+			StoreOlder bool `json:"store_older"`
 		}
 		if err := c.do("GET", "/api/v1/pause", nil, &pause); err != nil {
 			return err
@@ -168,6 +173,9 @@ func cmdStatus() *cobra.Command {
 			_, _ = fmt.Fprintln(out, line)
 		}
 		_, _ = fmt.Fprintf(out, "automation paused: %v\n", pause.Paused)
+		if pause.Paused && pause.StoreOlder {
+			_, _ = fmt.Fprintln(out, storeOlderStatus)
+		}
 		if line := unloadedConfigLine(c, time.Now()); line != "" {
 			_, _ = fmt.Fprintln(out, line)
 		}

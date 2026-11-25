@@ -28,7 +28,14 @@ const (
 	// Incident, only Node and IncidentID: there is no incident to show, and a
 	// link to one would lead nowhere.
 	EventNodeKept EventKind = "node_kept"
+	// EventStoreOlder says the controller paused automation because the
+	// workflow store is older than the one it last used. It carries only
+	// Message.
+	EventStoreOlder EventKind = "store_older"
 )
+
+// StoreOlderMessage is the text of an EventStoreOlder notice.
+const StoreOlderMessage = "KubeNeuron paused automation: the workflow store is older than the one this controller last used (restored from a backup or replaced). Review the incidents waiting for approval and the cordons on your nodes, then run: kubeneuronctl resume"
 
 // NotifyEvent is a notification about an incident.
 type NotifyEvent struct {
@@ -157,6 +164,10 @@ var _ Notifier = (*Log)(nil)
 // rather than an error returned to a queue. slack, webhook and pagerduty all
 // check; this one dereferenced.
 func (l *Log) Notify(ctx context.Context, ev NotifyEvent) error {
+	if ev.Kind == EventStoreOlder {
+		l.Logger.Warn("controller notification", "kind", ev.Kind, "message", ev.Message)
+		return nil
+	}
 	if ev.Kind == EventNodeKept {
 		l.Logger.Warn("node notification",
 			"kind", ev.Kind, "node", ev.Node, "incident", ev.IncidentID, "message", ev.Message)

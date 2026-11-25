@@ -288,7 +288,7 @@ footer.lf{margin-top:1.4rem;color:var(--dimmer);font-size:.7rem;text-align:cente
       <a href="#/audit" data-view="audit"><span class="ic">≣</span> Audit</a>
     </nav>
     <div class="spacer"></div>
-    <div id="pauseChip">⏸ Automation paused<br><button class="btn good" onclick="setPause(false)">Resume</button></div>
+    <div id="pauseChip">⏸ Automation paused<div id="storeOlder" style="display:none;margin-top:.4rem;color:var(--fg)"><p>Automation was paused by the controller: the workflow store is older than the one this controller last used (restored from a backup or replaced). A pause and approval decisions made after that point are not in this store. Check the incidents waiting for approval and the cordons on your nodes: <span class="mono">kubeneuronctl incidents --state AWAITING_APPROVAL</span></p><p>When you have checked them, resume automation: <span class="mono">kubeneuronctl resume</span></p></div><button class="btn good" onclick="setPause(false)">Resume</button></div>
     <button class="btn danger" style="margin:.2rem" onclick="setPause(true)">⏸ Pause automation</button>
     <div class="userbox">
       <div class="avatar" id="avatar">·</div>
@@ -1185,6 +1185,7 @@ async function tick(){
       api("/api/v1/pause"), api("/api/v1/incidents"), api("/api/v1/nodes")]);
     cache = Object.assign(cache, {pause, incidents: incidents || [], nodes: nodes || []});
     $("pauseChip").style.display = pause.paused ? "block" : "none";
+    $("storeOlder").style.display = pause.paused && pause.store_older ? "block" : "none";
     const active = cache.incidents.filter(i => ACTIVE(i.state)).length;
     const approvals = cache.incidents.filter(i => i.state === "AWAITING_APPROVAL").length;
     const counter = $("incCount");

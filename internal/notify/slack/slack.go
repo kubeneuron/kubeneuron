@@ -44,10 +44,14 @@ var eventEmoji = map[notify.EventKind]string{
 	notify.EventNeedsHuman:  ":no_entry:",
 	notify.EventExpired:     ":hourglass:",
 	notify.EventNodeKept:    ":no_entry:",
+	notify.EventStoreOlder:  ":no_entry:",
 }
 
 // Notify implements notify.Notifier.
 func (n *Notifier) Notify(ctx context.Context, ev notify.NotifyEvent) error {
+	if ev.Kind == notify.EventStoreOlder {
+		return n.post(ctx, eventEmoji[ev.Kind]+" "+ev.Message)
+	}
 	if ev.Kind == notify.EventNodeKept {
 		return n.post(ctx, fmt.Sprintf("%s KubeNeuron: node `%s` needs an operator\n%s", eventEmoji[ev.Kind], ev.Node, ev.Message))
 	}

@@ -94,3 +94,13 @@ func TestNodeKeptNoticeShowsOnlyTheNodeAndMessage(t *testing.T) {
 		t.Fatalf("text = %q, want %q", got, want)
 	}
 }
+
+func TestStoreOlderNoticeIsTheMessage(t *testing.T) {
+	n, texts := capture(t, http.StatusOK)
+	if err := n.Notify(context.Background(), notify.NotifyEvent{Kind: notify.EventStoreOlder, Message: notify.StoreOlderMessage}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := (*texts)[0], ":no_entry: "+notify.StoreOlderMessage; got != want {
+		t.Fatalf("text = %q, want %q", got, want)
+	}
+}

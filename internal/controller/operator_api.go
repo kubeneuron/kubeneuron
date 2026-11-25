@@ -537,3 +537,35 @@ func (c *Controller) SetPaused(ctx context.Context, paused bool, actor string) e
 
 // Paused reports the global pause state.
 func (c *Controller) Paused() bool { return c.gate.Paused() }
+
+// PausedForOlderStore reports whether the pause includes the controller's
+// own, made because the store is older than the one it last used.
+func (c *Controller) PausedForOlderStore() bool {
+	return c.gate != nil && c.gate.PausedForOlderStore()
+}
+
+// PauseForOlderStore pauses automation because the store is older than the
+// one this controller last used, and sends one notice. A pause that already
+// carries this reason sends none.
+func (c *Controller) PauseForOlderStore(ctx context.Context) error {
+	if c.gate == nil {
+		return fmt.Errorf("global pause is unavailable: safety gate is not configured")
+	}
+	c.dispatchMu.Lock()
+	defer c.dispatchMu.Unlock()
+	already := c.gate.PausedForOlderStore()
+	if err := c.gate.PauseForOlderStore(ctx); err != nil {
+		return err
+	}
+	if err := c.cancelUndeliveredActionsForSafetyStop(ctx); err != nil {
+		return fmt.Errorf("cancel queued actions after pausing automation: %w", err)
+	}
+	c.log.Warn("automation paused: the workflow store is older than the one this controller last used (restored from a backup or replaced)")
+	if already {
+		return nil
+	}
+	if err := c.notify(ctx, notify.NotifyEvent{Kind: notify.EventStoreOlder, Message: notify.StoreOlderMessage}); err != nil {
+		c.log.Warn("store-older notification failed", "err", err)
+	}
+	return nil
+}

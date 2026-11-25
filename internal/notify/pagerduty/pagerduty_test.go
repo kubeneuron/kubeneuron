@@ -166,3 +166,17 @@ func TestNodeKeptNoticePagesWithoutAnIncident(t *testing.T) {
 		t.Fatalf("custom details = %v, want only the incident ID", p.CustomDetails)
 	}
 }
+
+func TestStoreOlderNoticePages(t *testing.T) {
+	n, got, done := capture(t)
+	defer done()
+	if err := n.Notify(context.Background(), notify.NotifyEvent{Kind: notify.EventStoreOlder, Message: notify.StoreOlderMessage}); err != nil {
+		t.Fatal(err)
+	}
+	if got.EventAction != "trigger" || got.DedupKey != "store-older" || got.Payload == nil {
+		t.Fatalf("event = %+v", got)
+	}
+	if p := got.Payload; p.Summary != notify.StoreOlderMessage || p.Source != "kubeneuron-controller" || p.Severity != "critical" || len(p.CustomDetails) != 0 {
+		t.Fatalf("payload = %+v", p)
+	}
+}

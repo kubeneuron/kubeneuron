@@ -350,6 +350,38 @@ func TestIncidentShowCrossZoneSuccessor(t *testing.T) {
 	}
 }
 
+func TestStatusSaysTheStoreIsOlder(t *testing.T) {
+	for _, tc := range []struct {
+		pause string
+		want  bool
+	}{
+		{`{"paused":true,"store_older":true}`, true},
+		{`{"paused":true}`, false},
+		{`{"paused":false}`, false},
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/v1/version":
+				_, _ = io.WriteString(w, `{"version":""}`)
+			case "/api/v1/incidents":
+				_, _ = io.WriteString(w, "[]")
+			case "/api/v1/pause":
+				_, _ = io.WriteString(w, tc.pause)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		out, err := runCommand(t, server.URL, "status")
+		server.Close()
+		want := "automation paused: true\n" +
+			"Automation was paused by the controller: the workflow store is older than the one this controller last used (restored from a backup or replaced). A pause and approval decisions made after that point are not in this store. Check the incidents waiting for approval and the cordons on your nodes: kubeneuronctl incidents --state AWAITING_APPROVAL\n" +
+			"When you have checked them, resume automation: kubeneuronctl resume\n"
+		if err != nil || strings.Contains(out, want) != tc.want || strings.Contains(out, "workflow store is older") != tc.want {
+			t.Fatalf("pause %s: status %q, %v", tc.pause, out, err)
+		}
+	}
+}
+
 func TestStatusContinuesAfterEmptyVersion(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

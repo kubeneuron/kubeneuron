@@ -22,6 +22,21 @@ API is `v1alpha1`.
   fails, the controller discards the reused review and asks the Kubernetes API
   again, so a token whose Pod is gone is answered with 401, as in
   v1.0.0-rc.1.
+- After a restore, the controller can pause automation on its own. It keeps
+  a generation number in the workflow store and a copy in the annotation
+  `kubeneuron.io/store-generation` on its Lease `<installation>-controller`,
+  and compares them when it starts or becomes leader. When the store is older
+  than the copy, for example after a restore of a copy made through the
+  backup endpoint (the backup CronJob), the controller pauses automation,
+  says so in `kubeneuronctl status` and the panel, and sends one
+  `store_older` notice. Automation stays paused until you run
+  `kubeneuronctl resume`. An existing pause is kept with its actor. A restore
+  from `pg_dump` or a volume snapshot may not be detected; after any restore,
+  check `kubeneuronctl status` as described in the restore section of
+  `docs/operations.md`. With SQLite, where there is no leader election, the
+  controller now creates the Lease itself. With no copy yet (a first
+  installation, an upgrade from v1.0.0-rc.1) or a copy that cannot be read,
+  the controller does not pause and logs one line.
 - The operator grants the controller a Role with list and watch access to
   ServiceAccounts and DaemonSets in the installation namespace. Until the Role
   is available, the controller uses live API reads for these resources. It logs
@@ -78,6 +93,8 @@ API is `v1alpha1`.
 - install.sh --uninstall stops when an incident has a cloud replacement in progress (override with --skip-open-incident-check), turns back on the NVIDIA GPU Operator components that KubeNeuron had turned off on a node, and lists nodes that still have a KubeNeuron cordon or taint with the commands to remove them. Uninstall now needs jq, curl and openssl on the machine that runs it.
 
 - After the upgrade, a KubeNeuron cordon or degraded taint whose incident is no longer in the store is kept and reported to the operator instead of being removed. Check those nodes and remove the cordon or taint yourself.
+
+- New notice kind `store_older` when the controller pauses automation because the workflow store is older than the one it last used. The webhook payload has only `version`, `kind` and `message`, no `incident` object. PagerDuty receives a `critical` event with `dedup_key` `store-older` that is not resolved automatically.
 
 - New notice kind `node_kept` for a kept cordon or degraded taint. The webhook payload has no `incident` object, only `node` and, when recorded, `incident_id`. PagerDuty receives a `critical` event that is not resolved automatically. Consumers that expect an `incident` object in every notice need to handle it.
 

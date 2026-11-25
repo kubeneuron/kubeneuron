@@ -2805,11 +2805,37 @@ exercise_backup_restore() {
 	after=$(curl --silent --noproxy '*' --max-time 10 \
 		-H 'Authorization: Bearer integration-operator-token' \
 		"http://127.0.0.1:${port}/api/v1/incidents" | "$JQ_BIN" 'length')
+	# The snapshot is behind the store generation the controller copied to its
+	# Lease, so the restored controller pauses automation and says why.
+	restored_pause=$(curl --silent --noproxy '*' --max-time 10 \
+		-H 'Authorization: Bearer integration-operator-token' \
+		"http://127.0.0.1:${port}/api/v1/pause")
+	resume_code=$(curl --silent --noproxy '*' --max-time 10 -o /dev/null -w '%{http_code}' -X DELETE \
+		-H 'Authorization: Bearer integration-operator-token' \
+		"http://127.0.0.1:${port}/api/v1/pause?actor=integration")
+	resumed_pause=$(curl --silent --noproxy '*' --max-time 10 \
+		-H 'Authorization: Bearer integration-operator-token' \
+		"http://127.0.0.1:${port}/api/v1/pause")
 	kill "$pf_pid" >/dev/null 2>&1 || true
 	wait "$pf_pid" >/dev/null 2>&1 || true
 
 	[[ "$after" == "$before" ]] ||
 		die "restored incident count $after != snapshot count $before"
+	[[ $("$JQ_BIN" -c . <<<"$restored_pause") == '{"paused":true,"store_older":true}' ]] ||
+		die "restored controller pause state is $restored_pause, want paused for an older store"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" logs "deploy/${ROOT_NAME}-controller" |
+		grep -q '"kind":"store_older"' ||
+		die "restored controller logged no store_older notice"
+	[[ $resume_code == 204 && $("$JQ_BIN" -c . <<<"$resumed_pause") == '{"paused":false}' ]] ||
+		die "resume after restore returned $resume_code and $resumed_pause"
+	# The copy goes with the installation: the Lease is owned by the root, so
+	# a new installation of the same name does not start paused.
+	lease_owner=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get lease "${ROOT_NAME}-controller" \
+		-o jsonpath='{.metadata.ownerReferences[?(@.kind=="KubeNeuron")].uid}')
+	root_owner=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.metadata.uid}')
+	[[ -n $lease_owner && $lease_owner == "$root_owner" ]] ||
+		die "controller Lease owner is '$lease_owner', want the KubeNeuron root '$root_owner'"
+	note "restored controller paused automation for an older store, sent one store_older notice and resumed on request; its Lease is owned by the installation"
 	note "backup snapshot restored through the documented helper-pod procedure; $after incident(s) survived a wiped database"
 }
 

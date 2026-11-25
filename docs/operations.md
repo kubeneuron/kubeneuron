@@ -97,13 +97,16 @@ because its store has no record of the incident that placed it (after a
 reinstall with a new store, or after restoring an older backup). This covers
 the cordon and the degraded taint only. The notice is sent once; the alert
 is not resolved automatically. Resolve it in PagerDuty after you have checked
-the node.
+the node. `store_older` pages at `critical` with `dedup_key` `store-older`
+when the controller paused automation because the workflow store is older
+than the one it last used; it is not resolved automatically either.
 
 The generic webhook receives `POST` JSON
 `{"version":1,"kind":"<event|approval_required>","step?","message?","incident":{...}}`.
 A `node_kept` notice has no `incident` object; it carries
 `{"version":1,"kind":"node_kept","message","node","incident_id?"}`, with
-`incident_id` absent when the taint records no incident. The request has an
+`incident_id` absent when the taint records no incident. A `store_older`
+notice carries only `{"version":1,"kind":"store_older","message"}`. The request has an
 optional `Authorization: Bearer` header from the Secret's `token` key.
 For an approval request, the message includes the approve and reject commands for its round, the decision deadline when available, and the effect of rejecting the step. When the notification includes an impact digest, the approve command carries it. Consumers must ignore unknown fields.
 

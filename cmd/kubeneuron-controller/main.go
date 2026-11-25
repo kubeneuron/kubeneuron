@@ -25,6 +25,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 
@@ -48,6 +49,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/store/postgres"
 	"github.com/kubeneuron/kubeneuron/internal/store/sqlcore"
 	"github.com/kubeneuron/kubeneuron/internal/store/sqlite"
+	"github.com/kubeneuron/kubeneuron/internal/storegen"
 	"github.com/kubeneuron/kubeneuron/internal/telemetry"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 	"github.com/kubeneuron/kubeneuron/web"
@@ -451,6 +453,37 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 		// pg_dump/PITR (see operations).
 		api.SetBackupStore(sqliteBackup, filepath.Dir(dbPath))
 	}
+	// The store generation and its copy on the controller's Lease tell a
+	// store older than the one this controller last used.
+	var generation *storegen.Tracker
+	if kubePlatform != nil && agentServer.InstallationName != "" {
+		leaseNamespace, leaseName := election.namespace, election.name
+		if leaseNamespace == "" {
+			leaseNamespace = agentServer.Namespace
+		}
+		if leaseName == "" {
+			leaseName = agentServer.InstallationName + "-controller"
+		}
+		if leaseNamespace != "" {
+			var owner *metav1.OwnerReference
+			if agentServer.InstallationUID != "" {
+				// The Lease goes with the installation, so a new installation
+				// with a clean store under the same name finds no copy.
+				owner = &metav1.OwnerReference{
+					APIVersion: "kubeneuron.io/v1alpha1", Kind: "KubeNeuron",
+					Name: agentServer.InstallationName, UID: k8stypes.UID(agentServer.InstallationUID),
+				}
+			}
+			generation = storegen.New(st, kubePlatform.Client().CoordinationV1().Leases(leaseNamespace), leaseName, owner)
+			// A snapshot keeps the generation it was taken at; the live store
+			// moves past it, so restoring the snapshot is recognised.
+			api.SetBackupTaken(func(ctx context.Context) {
+				if err := generation.Advance(ctx); err != nil {
+					log.Warn("Raising the workflow store generation after a backup failed", "err", err)
+				}
+			})
+		}
+	}
 	if dist, err := web.Dist(); err == nil {
 		api.SetUI(http.FS(dist))
 	} else {
@@ -748,6 +781,14 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 						stop()
 						return
 					}
+					if generation != nil {
+						if err := checkStoreGeneration(leadCtx, generation, ctrl, log); err != nil {
+							log.Error("check the workflow store generation on leadership", "err", err)
+							stop()
+							return
+						}
+						go advanceStoreGeneration(leadCtx, generation, log, storeGenerationInterval)
+					}
 					leading.Store(true)
 					go publishInventory(leadCtx)
 					go watchNodeConfigPauses(leadCtx, ctrl, paths.nodeConfigs, log)
@@ -775,6 +816,12 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 			},
 		})
 	} else {
+		if generation != nil {
+			if err := checkStoreGeneration(ctx, generation, ctrl, log); err != nil {
+				return err
+			}
+			go advanceStoreGeneration(ctx, generation, log, storeGenerationInterval)
+		}
 		go publishInventory(ctx)
 		if err := ctrl.Run(ctx); err != nil {
 			return err

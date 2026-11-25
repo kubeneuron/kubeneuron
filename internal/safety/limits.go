@@ -76,6 +76,9 @@ type Gate struct {
 	// authorization decision; identity is owned by the API boundary.
 	pauseActor     string
 	pauseChangedAt time.Time
+	// storeOlder is set while the pause includes the controller's own, made
+	// because the store is older than the one it last used. Resume clears it.
+	storeOlder bool
 	// active and reboots are refcounts per target key (node[/gpu-uuid]).
 	// Several concurrent incidents may act on the same target; the target
 	// counts once against the limit, and its slot is only released when the
@@ -116,6 +119,37 @@ func (g *Gate) Resume() { g.setPausedBestEffort(false, "") }
 // Paused reports the pause state.
 func (g *Gate) Paused() bool { g.mu.Lock(); defer g.mu.Unlock(); return g.paused }
 
+// PausedForOlderStore reports whether the pause includes the controller's
+// own, made because the store is older than the one it last used.
+func (g *Gate) PausedForOlderStore() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.paused && g.storeOlder
+}
+
+// PauseForOlderStore durably adds the controller's own reason to the pause.
+// A pause already in the store keeps its actor and time: the reason is added
+// to the operator's record, not put in its place.
+func (g *Gate) PauseForOlderStore(ctx context.Context) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.store == nil {
+		return errors.New("global pause persistence is unavailable")
+	}
+	pause := g.pauseLocked()
+	if !pause.Paused {
+		pause = pauseSnapshot{Paused: true, Actor: "controller", ChangedAt: g.now().UTC()}
+	}
+	pause.StoreOlder = true
+	persistCtx, cancel := boundedStateContext(ctx)
+	defer cancel()
+	if err := g.persistPauseLocked(persistCtx, pause); err != nil {
+		return err
+	}
+	g.setPauseLocked(pause)
+	return nil
+}
+
 // DryRun reports whether the gate is in dry-run mode.
 func (g *Gate) DryRun() bool { g.mu.Lock(); defer g.mu.Unlock(); return g.limits.DryRun }
 
@@ -136,29 +170,30 @@ func (g *Gate) SetPaused(ctx context.Context, paused bool, actor string) error {
 	if g.store == nil {
 		return errors.New("global pause persistence is unavailable")
 	}
-	changedAt := g.now().UTC()
+	// Pausing again keeps the controller's reason; resuming clears it.
+	pause := pauseSnapshot{Paused: paused, Actor: actor, ChangedAt: g.now().UTC(), StoreOlder: paused && g.storeOlder}
 	persistCtx, cancel := boundedStateContext(ctx)
 	defer cancel()
-	if err := g.persistPauseLocked(persistCtx, paused, actor, changedAt); err != nil {
+	if err := g.persistPauseLocked(persistCtx, pause); err != nil {
 		return err
 	}
-	g.paused, g.pauseActor, g.pauseChangedAt = paused, actor, changedAt
+	g.setPauseLocked(pause)
 	return nil
 }
 
 func (g *Gate) setPausedBestEffort(paused bool, actor string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	changedAt := g.now().UTC()
+	pause := pauseSnapshot{Paused: paused, Actor: actor, ChangedAt: g.now().UTC(), StoreOlder: paused && g.storeOlder}
 	if g.store != nil {
 		persistCtx, cancel := boundedStateContext(context.Background())
-		err := g.persistPauseLocked(persistCtx, paused, actor, changedAt)
+		err := g.persistPauseLocked(persistCtx, pause)
 		cancel()
 		if err != nil && g.storeLog != nil {
 			g.storeLog.Warn("persisting global pause failed; state survives in memory only", "err", err)
 		}
 	}
-	g.paused, g.pauseActor, g.pauseChangedAt = paused, actor, changedAt
+	g.setPauseLocked(pause)
 }
 
 // SetDryRun toggles dry-run mode at runtime (admin API).

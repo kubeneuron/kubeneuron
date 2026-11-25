@@ -431,3 +431,71 @@ func TestANodeScopedTargetStillKeysToTheNode(t *testing.T) {
 			"one stable key without a post-commit re-key race", got)
 	}
 }
+
+func TestPauseForOlderStore(t *testing.T) {
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	restore := func(store *memStateStore) *Gate {
+		t.Helper()
+		g := NewGate(Limits{MaxConcurrentRemediations: 10, MaxConcurrentReboots: 1})
+		if err := g.RestoreAndPersist(ctx, store, log); err != nil {
+			t.Fatal(err)
+		}
+		return g
+	}
+
+	t.Run("adds the reason and survives restart until resume", func(t *testing.T) {
+		store := &memStateStore{}
+		g := restore(store)
+		if err := g.PauseForOlderStore(ctx); err != nil {
+			t.Fatal(err)
+		}
+		g = restore(store)
+		if !g.Paused() || !g.PausedForOlderStore() || g.pauseActor != "controller" {
+			t.Fatalf("after restart: paused=%v older=%v actor=%q", g.Paused(), g.PausedForOlderStore(), g.pauseActor)
+		}
+		// Pausing again keeps the reason; resuming clears it.
+		if err := g.SetPaused(ctx, true, "alice"); err != nil {
+			t.Fatal(err)
+		}
+		if !g.PausedForOlderStore() {
+			t.Fatal("a second pause dropped the reason")
+		}
+		if err := g.SetPaused(ctx, false, "alice"); err != nil {
+			t.Fatal(err)
+		}
+		if g = restore(store); g.Paused() || g.PausedForOlderStore() {
+			t.Fatalf("after resume: paused=%v older=%v", g.Paused(), g.PausedForOlderStore())
+		}
+	})
+
+	t.Run("keeps the operator's pause record", func(t *testing.T) {
+		store := &memStateStore{}
+		g := restore(store)
+		if err := g.SetPaused(ctx, true, "alice"); err != nil {
+			t.Fatal(err)
+		}
+		at := g.pauseChangedAt
+		if err := g.PauseForOlderStore(ctx); err != nil {
+			t.Fatal(err)
+		}
+		g = restore(store)
+		if g.pauseActor != "alice" || !g.pauseChangedAt.Equal(at) || !g.PausedForOlderStore() {
+			t.Fatalf("actor=%q at=%s older=%v", g.pauseActor, g.pauseChangedAt, g.PausedForOlderStore())
+		}
+	})
+
+	t.Run("an earlier record has no reason", func(t *testing.T) {
+		store := &memStateStore{kinds: map[string][]byte{stateKindPause: []byte(`{"paused":true,"actor":"bob"}`)}}
+		if g := restore(store); !g.Paused() || g.PausedForOlderStore() {
+			t.Fatalf("paused=%v older=%v", g.Paused(), g.PausedForOlderStore())
+		}
+	})
+
+	t.Run("without a store it refuses", func(t *testing.T) {
+		g := NewGate(Limits{MaxConcurrentRemediations: 10, MaxConcurrentReboots: 1})
+		if err := g.PauseForOlderStore(ctx); err == nil || g.Paused() {
+			t.Fatalf("err=%v paused=%v", err, g.Paused())
+		}
+	})
+}

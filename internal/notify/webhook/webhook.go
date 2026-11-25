@@ -63,6 +63,9 @@ func New(url, token string) *Notifier {
 
 // Notify implements notify.Notifier.
 func (n *Notifier) Notify(ctx context.Context, ev notify.NotifyEvent) error {
+	if ev.Kind == notify.EventStoreOlder {
+		return n.post(ctx, Payload{Version: 1, Kind: string(ev.Kind), Message: ev.Message})
+	}
 	if ev.Kind == notify.EventNodeKept {
 		return n.post(ctx, Payload{
 			Version: 1, Kind: string(ev.Kind), Message: ev.Message, Node: ev.Node, IncidentID: ev.IncidentID,

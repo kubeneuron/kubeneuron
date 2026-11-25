@@ -66,10 +66,21 @@ var eventSeverity = map[notify.EventKind]string{
 	notify.EventNeedsHuman:  "critical",
 	notify.EventExpired:     "critical",
 	notify.EventNodeKept:    "critical",
+	notify.EventStoreOlder:  "critical",
 }
 
 // Notify implements notify.Notifier.
 func (n *Notifier) Notify(ctx context.Context, ev notify.NotifyEvent) error {
+	if ev.Kind == notify.EventStoreOlder {
+		summary := ev.Message
+		if len(summary) > 1024 { // Events v2 summary limit
+			summary = summary[:1024]
+		}
+		return n.post(ctx, event{
+			RoutingKey: n.RoutingKey, EventAction: "trigger", DedupKey: "store-older",
+			Payload: &payload{Summary: summary, Source: "kubeneuron-controller", Severity: eventSeverity[ev.Kind]},
+		})
+	}
 	if ev.Kind == notify.EventNodeKept {
 		summary := fmt.Sprintf("KubeNeuron: node %s needs an operator: %s", ev.Node, ev.Message)
 		if len(summary) > 1024 { // Events v2 summary limit

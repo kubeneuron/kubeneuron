@@ -163,6 +163,7 @@ type Server struct {
 	ui                http.Handler
 	backupStore       BackupStore
 	backupDir         string
+	backupTaken       func(context.Context)
 	// leaderCheck is installed by the controller when leader election is on.
 	// Readiness keeps Services on the active replica, while this explicit guard
 	// protects direct Pod access and port-forwarding from creating a second
@@ -184,6 +185,9 @@ func (s *Server) SetBackupStore(store BackupStore, dir string) {
 	s.backupStore = store
 	s.backupDir = dir
 }
+
+// SetBackupTaken registers a call made after each snapshot is written.
+func (s *Server) SetBackupTaken(fn func(context.Context)) { s.backupTaken = fn }
 
 // SetControllerVersion sets the build version reported to operator clients.
 func (s *Server) SetControllerVersion(version string) { s.controllerVersion = version }

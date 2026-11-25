@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +28,13 @@ type fakeOperator struct {
 	resolved    []string
 	paused      bool
 }
+
+type storeOlderOperator struct {
+	*fakeOperator
+	older bool
+}
+
+func (f *storeOlderOperator) PausedForOlderStore() bool { return f.older }
 
 type acceleratorReportOperator struct {
 	*fakeOperator
@@ -205,6 +213,25 @@ func TestOperatorAPIReadsAndDecisions(t *testing.T) {
 	handler.ServeHTTP(rec, operatorRequest("POST", "/api/v1/incidents/inc-1/resolve", "secret", `{"actor":"bob","reason":"replaced GPU"}`))
 	if rec.Code != http.StatusNoContent || len(op.resolved) != 1 {
 		t.Fatalf("resolve = %d, resolved %v", rec.Code, op.resolved)
+	}
+}
+
+func TestOperatorAPIPauseSaysTheStoreIsOlder(t *testing.T) {
+	for _, op := range []OperatorBackend{
+		&storeOlderOperator{fakeOperator: &fakeOperator{paused: true}, older: true},
+		&storeOlderOperator{fakeOperator: &fakeOperator{paused: true}},
+		&fakeOperator{paused: true},
+	} {
+		rec := httptest.NewRecorder()
+		operatorServer(op, "secret").ServeHTTP(rec, operatorRequest("GET", "/api/v1/pause", "secret", ""))
+		older, _ := op.(*storeOlderOperator)
+		want := `{"paused":true}`
+		if older != nil && older.older {
+			want = `{"paused":true,"store_older":true}`
+		}
+		if got := strings.TrimSpace(rec.Body.String()); got != want {
+			t.Fatalf("pause state body = %s, want %s", got, want)
+		}
 	}
 }
 
@@ -643,6 +670,38 @@ func TestApprovalConflictHeaders(t *testing.T) {
 		operatorServer(&fakeOperator{decisionErr: tc.err}, "secret").ServeHTTP(rec, operatorRequest("POST", "/api/v1/incidents/inc/approve", "secret", `{"actor":"test"}`))
 		if rec.Code != 409 || rec.Header().Get("X-Approval-Conflict") != tc.kind || rec.Header().Get("X-Approval-Decision") != tc.decision || strings.TrimSpace(rec.Body.String()) != tc.err.Error() {
 			t.Fatalf("unexpected conflict: %d %v %s", rec.Code, rec.Header(), rec.Body)
+		}
+	}
+}
+
+type fileBackupStore struct{ calls *[]string }
+
+func (f fileBackupStore) BackupTo(_ context.Context, path string) error {
+	*f.calls = append(*f.calls, "snapshot")
+	return os.WriteFile(path, []byte("db"), 0o600)
+}
+
+// The store generation is raised only after the snapshot is written, so the
+// snapshot is behind the live store and its copy.
+func TestBackupRaisesTheGenerationAfterTheSnapshot(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		var calls []string
+		s := New(&registrationBackend{})
+		s.EnableOperatorAPI(&fakeOperator{}, "secret")
+		var store BackupStore = fileBackupStore{calls: &calls}
+		if fail {
+			store = nopBackupStore{}
+		}
+		s.SetBackupStore(store, t.TempDir())
+		s.SetBackupTaken(func(context.Context) { calls = append(calls, "advance") })
+		rec := httptest.NewRecorder()
+		s.Routes().ServeHTTP(rec, operatorRequest("GET", "/api/v1/backup", "secret", ""))
+		want := "snapshot advance"
+		if fail {
+			want = ""
+		}
+		if got := strings.Join(calls, " "); got != want {
+			t.Fatalf("fail=%v: calls %q, want %q (status %d)", fail, got, want, rec.Code)
 		}
 	}
 }

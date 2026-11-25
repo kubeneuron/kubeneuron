@@ -111,3 +111,22 @@ func TestNodeKeptNoticeCarriesNoIncident(t *testing.T) {
 		}
 	}
 }
+
+func TestStoreOlderNoticeCarriesOnlyTheMessage(t *testing.T) {
+	var raw map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	err := New(server.URL, "").Notify(context.Background(), notify.NotifyEvent{Kind: notify.EventStoreOlder, Message: notify.StoreOlderMessage})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) != 3 || raw["version"] != float64(1) || raw["kind"] != "store_older" || raw["message"] != notify.StoreOlderMessage {
+		t.Fatalf("payload = %v", raw)
+	}
+}
