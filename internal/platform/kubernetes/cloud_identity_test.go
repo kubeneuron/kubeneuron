@@ -4,11 +4,16 @@ package kubernetes
 import (
 	"context"
 	"errors"
+	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	"testing"
 )
 
@@ -43,6 +48,41 @@ func TestCloudNodeReadsLiveIdentity(t *testing.T) {
 	}
 	if _, err := p.CloudNode(ctx, n.Name); err == nil {
 		t.Fatal("missing boot accepted")
+	}
+}
+
+// Only the Kubernetes API's NotFound for the live read says that no Node of
+// the name exists; a read that fails otherwise, or no cloud provider to read
+// it with, says nothing about the Node.
+func TestCloudNodeTellsANodeThatDoesNotExist(t *testing.T) {
+	ctx := context.Background()
+	p := &Platform{client: fake.NewSimpleClientset(), recycler: &fakeRecycler{}}
+	_, err := p.CloudNode(ctx, "worker")
+	if !errors.Is(err, platform.ErrNodeNotFound) || !apierrors.IsNotFound(err) || err.Error() != `nodes "worker" not found` {
+		t.Fatalf("read of a missing Node failed with %v", err)
+	}
+
+	nodes := schema.GroupResource{Resource: "nodes"}
+	for name, readErr := range map[string]error{
+		"timeout":   apierrors.NewTimeoutError("the read took too long", 2),
+		"forbidden": apierrors.NewForbidden(nodes, "worker", errors.New("no access")),
+		"transport": errors.New("connection refused"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := fake.NewSimpleClientset()
+			client.PrependReactor("get", "nodes", func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, nil, readErr
+			})
+			p := &Platform{client: client, recycler: &fakeRecycler{}}
+			if _, err := p.CloudNode(ctx, "worker"); err == nil || errors.Is(err, platform.ErrNodeNotFound) {
+				t.Fatalf("read failed with %v, want an error that says nothing about the Node", err)
+			}
+		})
+	}
+
+	unconfigured := &Platform{client: fake.NewSimpleClientset()}
+	if _, err := unconfigured.CloudNode(ctx, "worker"); err == nil || errors.Is(err, platform.ErrNodeNotFound) {
+		t.Fatalf("read without a cloud provider failed with %v", err)
 	}
 }
 

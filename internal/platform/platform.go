@@ -29,6 +29,11 @@ type CloudNodeObserver interface {
 	CloudNode(context.Context, string) (cloud.NodeRef, error)
 }
 
+// ErrNodeNotFound is in the chain of a CloudNode error when the Kubernetes
+// API answered the live read that no Node of the name exists. Any other
+// error says nothing about whether the Node exists.
+var ErrNodeNotFound = errors.New("no node of that name exists")
+
 // GuardedNodeRecycler never resolves a mutation target from a name alone.
 // Eligibility is advisory; each mutation repeats the checks against its pin.
 type GuardedNodeRecycler interface {

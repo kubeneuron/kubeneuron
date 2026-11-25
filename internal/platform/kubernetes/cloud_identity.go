@@ -9,8 +9,10 @@ import (
 	"slices"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 )
@@ -21,6 +23,9 @@ func (p *Platform) CloudNode(ctx context.Context, name string) (cloud.NodeRef, e
 		return cloud.NodeRef{}, fmt.Errorf("no cloud provider is configured")
 	}
 	n, err := p.client.CoreV1().Nodes().Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return cloud.NodeRef{}, nodeNotFound{err}
+	}
 	if err != nil {
 		return cloud.NodeRef{}, err
 	}
@@ -39,6 +44,13 @@ func (p *Platform) CloudNode(ctx context.Context, name string) (cloud.NodeRef, e
 	}
 	return ref, nil
 }
+
+// nodeNotFound is the Kubernetes API's NotFound for a live Node read. It keeps
+// the API's message and error, and adds platform.ErrNodeNotFound to the chain.
+type nodeNotFound struct{ err error }
+
+func (e nodeNotFound) Error() string   { return e.err.Error() }
+func (e nodeNotFound) Unwrap() []error { return []error{platform.ErrNodeNotFound, e.err} }
 
 // MatchCloudNodeUID reads only the Node. Compare its UID before parsing the
 // provider ID: a newly created Node may not have a provider ID yet.

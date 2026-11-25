@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/detect"
+	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/safety"
 	"github.com/kubeneuron/kubeneuron/internal/store"
@@ -23,8 +24,8 @@ import (
 )
 
 // machines answers for the machine behind each node with one live read: a
-// node without an entry has no Node, and err fails every read. reads counts
-// the reads.
+// node without an entry has no Node, which the read reports as the Kubernetes
+// API's NotFound, and err fails every read. reads counts the reads.
 type machines struct {
 	mmu   sync.Mutex
 	uids  map[string]string
@@ -41,7 +42,7 @@ func (m *machines) CloudNode(_ context.Context, node string) (cloud.NodeRef, err
 	}
 	uid, ok := m.uids[node]
 	if !ok {
-		return cloud.NodeRef{}, fmt.Errorf("nodes %q not found", node)
+		return cloud.NodeRef{}, fmt.Errorf("nodes %q not found: %w", node, platform.ErrNodeNotFound)
 	}
 	return cloud.NodeRef{Identity: machineOf(node, uid)}, nil
 }
@@ -215,11 +216,12 @@ func TestSignalOfARemovedMachineIsRecordedOnItsReplacement(t *testing.T) {
 func TestSignalOpensAsBeforeUnlessItsMachineWasRemoved(t *testing.T) {
 	pin := machineOf("node-a", "uid-a")
 	cases := []struct {
-		name    string
-		inc     *types.Incident
-		uids    map[string]string
-		readErr error
-		sig     types.Signal
+		name       string
+		inc        *types.Incident
+		uids       map[string]string
+		readErr    error
+		noObserver bool
+		sig        types.Signal
 	}{
 		{name: "the replacement waits for a person", inc: replacing(types.StateNeedsHuman, types.SuccessorReplaced)},
 		{name: "the replacement ended", inc: replacing(types.StateResolved, types.SuccessorReplaced)},
@@ -237,10 +239,13 @@ func TestSignalOpensAsBeforeUnlessItsMachineWasRemoved(t *testing.T) {
 		{name: "the GKE plan did not start", inc: removingFirst(types.StateEvaluating, 0, cloud.RemoveFirstPlanned, types.RemoveFirstNotStarted, cloud.NodeIdentity{}, "i-uid-a")},
 		{name: "the GKE plan removed another instance", inc: removingFirst(types.StateVerifying, 0, cloud.RemoveFirstDone, types.RemoveFirstRestored, cloud.NodeIdentity{}, "i-uid-other")},
 		{name: "a new machine has the name", inc: replacing(types.StateVerifying, types.SuccessorReplaced), uids: map[string]string{"node-a": "uid-new"}},
-		{name: "the Node is gone", inc: replacing(types.StateVerifying, types.SuccessorReplaced), uids: map[string]string{}},
 		{name: "the Node cannot be read", inc: replacing(types.StateVerifying, types.SuccessorReplaced), readErr: errors.New("context deadline exceeded")},
+		{name: "the cloud does not find the instance", inc: replacing(types.StateVerifying, types.SuccessorReplaced), readErr: errors.New("instance i-uid-a not found")},
+		{name: "no live read of Nodes", inc: replacing(types.StateVerifying, types.SuccessorReplaced), noObserver: true},
 		{name: "another node", inc: replacing(types.StateVerifying, types.SuccessorReplaced), sig: agentDown("node-b")},
 		{name: "a person raised it", inc: replacing(types.StateVerifying, types.SuccessorReplaced), sig: types.Signal{
+			Target: types.Target{Node: "node-a"}, Class: types.ClassAgentDown, Severity: types.SeverityWarning, Source: types.SourceManual}},
+		{name: "a person raised it after the Node was deleted", inc: replacing(types.StateVerifying, types.SuccessorReplaced), uids: map[string]string{}, sig: types.Signal{
 			Target: types.Target{Node: "node-a"}, Class: types.ClassAgentDown, Severity: types.SeverityWarning, Source: types.SourceManual}},
 	}
 	for _, tc := range cases {
@@ -250,6 +255,9 @@ func TestSignalOpensAsBeforeUnlessItsMachineWasRemoved(t *testing.T) {
 				m.uids = tc.uids
 			}
 			m.err = tc.readErr
+			if tc.noObserver {
+				c.platform = &basePlatform{}
+			}
 			sig := tc.sig
 			if sig.Class == "" {
 				sig = agentDown("node-a")
@@ -378,10 +386,23 @@ func eccAlert(node, gpu string) types.Signal {
 // recurrence is the cause recorded when verification failed on a signal.
 const recurrence = "verification failed: signal recurred during quiet window"
 
+// sendXID79 is the agent on node-a reporting that GPU-1 fell off the bus, each
+// time as a new event, taken from the outbox in the transaction of its item.
+func sendXID79(c *Controller) error {
+	ev := types.AgentEvent{EventID: fmt.Sprintf("ev-79-%d", time.Now().UnixNano()), Node: "node-a", GPUUUID: "GPU-1", XID: 79,
+		Raw: "NVRM: Xid (PCI:0000:00:1e): 79", Timestamp: time.Now().UTC()}
+	if err := c.HandleAgentEvent(httptest.NewRequest("POST", "/api/v1/events", nil), ev); err != nil {
+		return err
+	}
+	c.drainEventOutbox(context.Background())
+	return nil
+}
+
 // While the incident verifies the replacement, the machine it removed reports
 // the incident's own fault again: its agent until the machine stops, vmalert
-// from the exporter's last samples. That is not the fault coming back on the
-// node that took its place.
+// from the exporter's last samples, and an alert rule that looks back over a
+// window even after the cloud deleted the Node. That is not the fault coming
+// back on the node that took its place.
 func TestFaultOfTheRemovedMachineIsNoRecurrence(t *testing.T) {
 	removals := map[string]func() *types.Incident{
 		"add-first": func() *types.Incident { return replacing(types.StateVerifying, types.SuccessorReplaced) },
@@ -393,46 +414,116 @@ func TestFaultOfTheRemovedMachineIsNoRecurrence(t *testing.T) {
 		},
 	}
 	sources := map[string]struct {
-		class types.ProblemClass
-		sig   types.Signal
+		class  types.ProblemClass
+		source types.SignalSource
+		send   func(*Controller) error
 	}{
-		"agent":   {types.ClassFellOffBus, signal(types.ClassFellOffBus, "node-a", "GPU-1")},
-		"vmalert": {types.ClassECCDBE, eccAlert("node-a", "GPU-1")},
+		"agent": {types.ClassFellOffBus, types.SourceAgentEvent, func(c *Controller) error {
+			return c.ingest(context.Background(), signal(types.ClassFellOffBus, "node-a", "GPU-1"))
+		}},
+		"agent, outbox": {types.ClassFellOffBus, types.SourceAgentEvent, sendXID79},
+		"vmalert": {types.ClassECCDBE, eccAlert("node-a", "GPU-1").Source, func(c *Controller) error {
+			return c.ingest(context.Background(), eccAlert("node-a", "GPU-1"))
+		}},
 	}
 	for removal, incident := range removals {
 		for source, s := range sources {
-			t.Run(removal+", "+source, func(t *testing.T) {
-				inc := verifyingFor(incident(), time.Minute)
-				inc.Target, inc.Class = types.Target{Node: "node-a", GPUUUID: "GPU-1"}, s.class
-				c, st, rec, _ := replacedNodeFixture(t, inc)
-				ctx := context.Background()
-				for range 2 {
-					if err := c.ingest(ctx, s.sig); err != nil {
+			for _, deleted := range []bool{false, true} {
+				name := removal + ", " + source
+				if deleted {
+					name += ", Node deleted"
+				}
+				t.Run(name, func(t *testing.T) {
+					inc := verifyingFor(incident(), time.Minute)
+					inc.Target, inc.Class = types.Target{Node: "node-a", GPUUUID: "GPU-1"}, s.class
+					c, st, rec, m := replacedNodeFixture(t, inc)
+					if deleted {
+						m.uids = map[string]string{}
+					}
+					ctx := context.Background()
+					for range 2 {
+						if err := s.send(c); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if err := c.advance(ctx, mustIncident(t, st, inc.ID)); err != nil {
 						t.Fatal(err)
 					}
-				}
-				if err := c.advance(ctx, mustIncident(t, st, inc.ID)); err != nil {
-					t.Fatal(err)
-				}
 
-				after := mustIncident(t, st, inc.ID)
-				if after.State != types.StateVerifying || !after.LastSignalAt.Equal(inc.LastSignalAt) || after.SignalSeen != inc.SignalSeen {
-					t.Fatalf("state %s, signals %d, last signal moved %v: the removed machine's fault counted as a recurrence%s",
-						after.State, after.SignalSeen, !after.LastSignalAt.Equal(inc.LastSignalAt), dump(trail(t, st, inc.ID)))
-				}
-				if len(rec.events) != 0 {
-					t.Errorf("notified %+v, want nothing", rec.events)
-				}
-				got := replacedNodeSignals(t, st, inc.ID)
-				if len(got) != 1 || got[0].Params["signal_class"] != string(s.class) || got[0].Params["signal_node_uid"] != "uid-a" ||
-					got[0].Params["signal_source"] != string(s.sig.Source) || got[0].Params["signal_gpu_uuid"] != "GPU-1" {
-					t.Fatalf("recorded %+v, want the fault once", got)
-				}
-				if want := string(s.class) + " was reported again for node-a after this incident removed its machine. It is recorded here and does not count as a recurrence"; got[0].Result != want {
-					t.Errorf("result %q, want %q", got[0].Result, want)
-				}
-			})
+					after := mustIncident(t, st, inc.ID)
+					if after.State != types.StateVerifying || !after.LastSignalAt.Equal(inc.LastSignalAt) || after.SignalSeen != inc.SignalSeen {
+						t.Fatalf("state %s, signals %d, last signal moved %v: the removed machine's fault counted as a recurrence%s",
+							after.State, after.SignalSeen, !after.LastSignalAt.Equal(inc.LastSignalAt), dump(trail(t, st, inc.ID)))
+					}
+					if len(rec.events) != 0 {
+						t.Errorf("notified %+v, want nothing", rec.events)
+					}
+					uid, node := "uid-a", ""
+					want := string(s.class) + " was reported again for node-a after this incident removed its machine. It is recorded here and does not count as a recurrence"
+					if deleted {
+						uid, node = "", "deleted"
+						want = string(s.class) + " was reported again for node-a after this incident removed its machine and the cloud deleted its Node. It is recorded here and does not count as a recurrence"
+					}
+					got := replacedNodeSignals(t, st, inc.ID)
+					if len(got) != 1 || got[0].Params["signal_class"] != string(s.class) || got[0].Params["signal_source"] != string(s.source) ||
+						got[0].Params["signal_gpu_uuid"] != "GPU-1" || got[0].Params["signal_node_uid"] != uid || got[0].Params["signal_node"] != node {
+						t.Fatalf("recorded %+v, want the fault once", got)
+					}
+					if got[0].Result != want {
+						t.Errorf("result %q, want %q", got[0].Result, want)
+					}
+				})
+			}
 		}
+	}
+}
+
+// An alert rule that looks back over a window fires for the removed machine
+// after the cloud deleted its Node: NVLink errors of the last fifteen minutes,
+// for one. While no Node of the name exists, such a signal is recorded on the
+// replacement like those before the delete, once for each class and device,
+// and opens nothing.
+func TestSignalAfterTheNodeWasDeletedIsRecordedOnItsReplacement(t *testing.T) {
+	inc := verifyingFor(replacing(types.StateVerifying, types.SuccessorReplaced), time.Minute)
+	c, st, rec, m := replacedNodeFixture(t, inc)
+	ctx := context.Background()
+	nvlink, _ := detect.SignalFromAlert(detect.Alert{Status: "firing", StartsAt: time.Now(),
+		Labels: map[string]string{"alertname": "GpuNvlinkCrcErrors", "node": "node-a", "UUID": "GPU-1", "gpu": "0"}})
+	before := mustIncident(t, st, inc.ID)
+	if err := c.ingest(ctx, eccAlert("node-a", "GPU-1")); err != nil {
+		t.Fatal(err)
+	}
+	m.uids = map[string]string{}
+	for _, sig := range []types.Signal{eccAlert("node-a", "GPU-1"), nvlink, nvlink} {
+		if err := c.ingest(ctx, sig); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if all := incidentsOn(t, st); len(all) != 1 {
+		t.Fatalf("%d incidents, want only the replacement: %+v", len(all), all)
+	}
+	if len(rec.events) != 0 {
+		t.Fatalf("notified %+v, want nothing", rec.events)
+	}
+	got := replacedNodeSignals(t, st, inc.ID)
+	if len(got) != 2 {
+		t.Fatalf("%d recorded signals, want ecc-dbe and nvlink once each: %+v", len(got), got)
+	}
+	ecc, nvl := got[0], got[1]
+	if ecc.Params["signal_class"] != string(types.ClassECCDBE) || ecc.Params["signal_node_uid"] != "uid-a" || ecc.Params["signal_node"] != "" {
+		t.Errorf("ecc-dbe recorded as %+v, want it once, with the Node read before the delete", ecc)
+	}
+	if nvl.Params["signal_class"] != string(types.ClassNVLink) || nvl.Params["signal_node"] != "deleted" ||
+		nvl.Params["signal_node_uid"] != "" || nvl.Params["signal_gpu_uuid"] != "GPU-1" || nvl.Params["alertname"] != "GpuNvlinkCrcErrors" {
+		t.Errorf("nvlink recorded as %+v", nvl)
+	}
+	if want := "nvlink was reported for node-a after this incident removed its machine and the cloud deleted its Node. It is recorded here and no separate incident was opened"; nvl.Result != want {
+		t.Errorf("result %q, want %q", nvl.Result, want)
+	}
+	if after := mustIncident(t, st, inc.ID); after.Version != before.Version || after.SignalSeen != before.SignalSeen ||
+		!after.LastSignalAt.Equal(before.LastSignalAt) || after.State != before.State {
+		t.Errorf("the replacement changed from %+v to %+v", before, after)
 	}
 }
 
@@ -485,23 +576,28 @@ func TestNodeHealthOfTheRemovedMachineIsNoRecurrence(t *testing.T) {
 
 // The fault the incident verifies against is a recurrence whenever it may
 // not be the removed machine's: from a new machine under the name, from a
-// person, from a Node that could not be read or is no longer there, or
-// before any machine was removed.
+// person, for a Node that could not be read, including a read that cannot
+// tell whether the Node exists, or before any machine was removed.
 func TestFaultThatMayNotBeTheRemovedMachinesIsARecurrence(t *testing.T) {
+	manual := types.Signal{Target: types.Target{Node: "node-a", GPUUUID: "GPU-1"}, Class: types.ClassFellOffBus,
+		Severity: types.SeverityCritical, Source: types.SourceManual}
 	cases := []struct {
-		name    string
-		inc     *types.Incident
-		uids    map[string]string
-		readErr error
-		sig     types.Signal
+		name       string
+		inc        *types.Incident
+		uids       map[string]string
+		readErr    error
+		noObserver bool
+		sig        types.Signal
 	}{
 		{name: "a new machine has the name", inc: replacing(types.StateVerifying, types.SuccessorReplaced), uids: map[string]string{"node-a": "uid-new"}},
 		{name: "a new machine after the delete", inc: removingFirst(types.StateVerifying, 1, cloud.RemoveFirstDone, types.RemoveFirstDeleteConfirmed, machineOf("node-a", "uid-a"), "i-uid-a"), uids: map[string]string{"node-a": "uid-new"}},
 		{name: "the Node cannot be read", inc: replacing(types.StateVerifying, types.SuccessorReplaced), readErr: errors.New("context deadline exceeded")},
-		{name: "the cloud deleted the Node", inc: replacing(types.StateVerifying, types.SuccessorReplaced), uids: map[string]string{}},
-		{name: "a person raised it", inc: replacing(types.StateVerifying, types.SuccessorReplaced), sig: types.Signal{
-			Target: types.Target{Node: "node-a", GPUUUID: "GPU-1"}, Class: types.ClassFellOffBus, Severity: types.SeverityCritical, Source: types.SourceManual}},
+		{name: "the cloud does not find the instance", inc: replacing(types.StateVerifying, types.SuccessorReplaced), readErr: errors.New("instance i-uid-a not found")},
+		{name: "no live read of Nodes", inc: replacing(types.StateVerifying, types.SuccessorReplaced), noObserver: true},
+		{name: "a person raised it", inc: replacing(types.StateVerifying, types.SuccessorReplaced), sig: manual},
+		{name: "a person raised it after the Node was deleted", inc: replacing(types.StateVerifying, types.SuccessorReplaced), uids: map[string]string{}, sig: manual},
 		{name: "no machine was removed", inc: replacing(types.StateVerifying, "")},
+		{name: "no machine was removed, no Node", inc: replacing(types.StateVerifying, ""), uids: map[string]string{}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -512,6 +608,9 @@ func TestFaultThatMayNotBeTheRemovedMachinesIsARecurrence(t *testing.T) {
 				m.uids = tc.uids
 			}
 			m.err = tc.readErr
+			if tc.noObserver {
+				c.platform = &basePlatform{}
+			}
 			sig := tc.sig
 			if sig.Class == "" {
 				sig = signal(types.ClassFellOffBus, "node-a", "GPU-1")
@@ -561,38 +660,37 @@ func removedDuringIngest(t *testing.T, c *Controller, st *sqlite.Store, m *machi
 	return &runs
 }
 
+// faultPaths send fell-off-bus for GPU-1 on node-a down each path of ingest:
+// a signal straight from its source, and an agent event through the outbox.
+var faultPaths = map[string]func(*Controller) error{
+	"signal": func(c *Controller) error {
+		return c.ingest(context.Background(), signal(types.ClassFellOffBus, "node-a", "GPU-1"))
+	},
+	"agent event": sendXID79,
+}
+
 // The replacement records that it removed the machine after ingest skipped
 // the read of the Node, since no machine was removed yet, and before the
 // transaction. The transaction stops, and ingest reads the Node and runs it
-// again: taken without the Node, the fault would fail the verification. A
-// Node that cannot be read then, or a new machine's, is the fault coming
-// back as before.
+// again: taken without the Node, the fault would fail the verification. No
+// Node of the name, deleted meanwhile, is the removed machine's as well. A
+// Node that cannot be read then, or a new machine's, is the fault coming back
+// as before.
 func TestFaultOfAMachineRemovedDuringIngestIsNoRecurrence(t *testing.T) {
 	cases := []struct {
 		name       string
 		uids       map[string]string
 		readErr    error
 		recurrence bool
+		// uid and node are the signal_node_uid and signal_node of the record.
+		uid, node string
 	}{
-		{name: "the removed machine's Node"},
+		{name: "the removed machine's Node", uid: "uid-a"},
+		{name: "the cloud deleted the Node", uids: map[string]string{}, node: "deleted"},
 		{name: "a new machine has the name", uids: map[string]string{"node-a": "uid-new"}, recurrence: true},
 		{name: "the Node cannot be read", readErr: errors.New("context deadline exceeded"), recurrence: true},
 	}
-	paths := map[string]func(*Controller) error{
-		"signal": func(c *Controller) error {
-			return c.ingest(context.Background(), signal(types.ClassFellOffBus, "node-a", "GPU-1"))
-		},
-		"agent event": func(c *Controller) error {
-			ev := types.AgentEvent{EventID: "ev-79", Node: "node-a", GPUUUID: "GPU-1", XID: 79,
-				Raw: "NVRM: Xid (PCI:0000:00:1e): 79", Timestamp: time.Now().UTC()}
-			if err := c.HandleAgentEvent(httptest.NewRequest("POST", "/api/v1/events", nil), ev); err != nil {
-				return err
-			}
-			c.drainEventOutbox(context.Background())
-			return nil
-		},
-	}
-	for path, ingest := range paths {
+	for path, ingest := range faultPaths {
 		for _, tc := range cases {
 			t.Run(path+", "+tc.name, func(t *testing.T) {
 				inc := verifyingFor(replacing(types.StateExecuting, ""), time.Minute)
@@ -617,7 +715,8 @@ func TestFaultOfAMachineRemovedDuringIngestIsNoRecurrence(t *testing.T) {
 				case after.State != types.StateVerifying || !after.LastSignalAt.Equal(inc.LastSignalAt) || after.SignalSeen != inc.SignalSeen:
 					t.Fatalf("state %s, signals %d, last signal moved %v: the removed machine's fault counted as a recurrence%s",
 						after.State, after.SignalSeen, !after.LastSignalAt.Equal(inc.LastSignalAt), dump(entries))
-				case len(got) != 1 || got[0].Params["signal_node_uid"] != "uid-a" || got[0].Params["signal_source"] != string(types.SourceAgentEvent):
+				case len(got) != 1 || got[0].Params["signal_node_uid"] != tc.uid || got[0].Params["signal_node"] != tc.node ||
+					got[0].Params["signal_source"] != string(types.SourceAgentEvent):
 					t.Fatalf("recorded %+v, want the fault once", got)
 				case len(rec.events) != 0:
 					t.Errorf("notified %+v, want nothing", rec.events)
@@ -627,6 +726,48 @@ func TestFaultOfAMachineRemovedDuringIngestIsNoRecurrence(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// The cloud deletes the Node after ingest read it for the fault and before
+// the transaction. The read was the removed machine's Node, and the fault is
+// recorded with it: the transaction does not read the Node again.
+func TestFaultWhoseNodeIsDeletedDuringIngestIsNoRecurrence(t *testing.T) {
+	for path, ingest := range faultPaths {
+		t.Run(path, func(t *testing.T) {
+			inc := verifyingFor(replacing(types.StateVerifying, types.SuccessorReplaced), time.Minute)
+			inc.Target = types.Target{Node: "node-a", GPUUUID: "GPU-1"}
+			c, st, rec, m := replacedNodeFixture(t, inc)
+			runs := 0
+			c.signalNodeRead = func() {
+				runs++
+				m.mmu.Lock()
+				defer m.mmu.Unlock()
+				m.uids = map[string]string{}
+			}
+			if err := ingest(c); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.advance(context.Background(), mustIncident(t, st, inc.ID)); err != nil {
+				t.Fatal(err)
+			}
+
+			after := mustIncident(t, st, inc.ID)
+			if after.State != types.StateVerifying || !after.LastSignalAt.Equal(inc.LastSignalAt) || after.SignalSeen != inc.SignalSeen {
+				t.Fatalf("state %s, signals %d, last signal moved %v: the removed machine's fault counted as a recurrence%s",
+					after.State, after.SignalSeen, !after.LastSignalAt.Equal(inc.LastSignalAt), dump(trail(t, st, inc.ID)))
+			}
+			got := replacedNodeSignals(t, st, inc.ID)
+			if len(got) != 1 || got[0].Params["signal_node_uid"] != "uid-a" || got[0].Params["signal_node"] != "" {
+				t.Fatalf("recorded %+v, want the fault once, with the Node read before the delete", got)
+			}
+			if len(rec.events) != 0 {
+				t.Errorf("notified %+v, want nothing", rec.events)
+			}
+			if runs != 1 || m.reads != 1 {
+				t.Fatalf("%d transactions, %d reads of the Node: want one of each", runs, m.reads)
+			}
+		})
 	}
 }
 

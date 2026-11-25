@@ -59,6 +59,24 @@ removed_machine_alert() {
     curl -fsS --max-time 5 -H "@$WEBHOOK_HEADER" -H 'Content-Type: application/json' -d @- "$API_URL/webhooks/vmalert/api/v2/alerts" >/dev/null
   wait_until audit_matches 'any(.audit[]; .action=="replaced-node-signal" and .params.signal_class=="agent-down" and .params.alertname=="KubeNeuronAgentDown")'
 }
+# An alert rule that looks back over a window, NVLink errors of the last
+# fifteen minutes for one, still fires for node $1 after its Node is deleted.
+# The replacing incident records the alert, and no incident opens for it.
+deleted_node_alert() {
+  test -z "$("${k[@]}" get node "$1" --ignore-not-found -o name)"
+  jq -nc --arg node "$1" '[{labels: {alertname: "GpuNvlinkCrcErrors", severity: "warning", node: $node, gpu: "0"},
+    annotations: {summary: ("NVLink CRC errors on " + $node + " GPU 0")}, startsAt: (now | todate)}]' |
+    curl -fsS --max-time 5 -H "@$WEBHOOK_HEADER" -H 'Content-Type: application/json' -d @- "$API_URL/webhooks/vmalert/api/v2/alerts" >/dev/null
+  wait_until nvlink_taken
+  jq -e 'all(.[]; .class != "nvlink")' "$EVIDENCE_DIR/deleted-node-incidents.json" >/dev/null
+  audit_matches 'any(.audit[]; .action=="replaced-node-signal" and .params.signal_class=="nvlink" and .params.signal_node=="deleted")'
+}
+# The controller took the NVLink alert: recorded it, or opened an incident.
+nvlink_taken() {
+  api incidents >"$EVIDENCE_DIR/deleted-node-incidents.json" || return 1
+  jq -e 'any(.[]; .class=="nvlink")' "$EVIDENCE_DIR/deleted-node-incidents.json" >/dev/null ||
+    audit_matches 'any(.audit[]; .action=="replaced-node-signal" and .params.signal_class=="nvlink")'
+}
 # The EKS node monitoring agent writes the injected fault on node $1 as a
 # condition. The Node keeps it after the machine is gone, fresh for ten
 # minutes after its last heartbeat, until the cloud deletes the Node.
@@ -158,11 +176,12 @@ removed_machine_alert "$successor"
 remove_machine "$successor" "$successor_id"
 removed_machine_fault
 "${k[@]}" delete node "$successor"
+deleted_node_alert "$successor"
 ./join-worker.sh "$final" "$final_id"
 wait_until report_ready "$final"
 resolved "$final" "$correlation"
-# Each replacement is one incident: neither alert opened one of its own.
-api incidents | jq -e 'all(.[]; .class != "agent-down")' >/dev/null
+# Each replacement is one incident: no alert opened one of its own.
+api incidents | jq -e 'all(.[]; .class != "agent-down" and .class != "nvlink")' >/dev/null
 if [[ ${REPLACEMENT_PROVIDER:-aws} == gke ]]; then
   final_uid=$("${k[@]}" get node "$final" -o jsonpath='{.metadata.uid}')
   test "$final_uid" != "$initial_uid"

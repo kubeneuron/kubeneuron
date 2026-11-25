@@ -678,15 +678,19 @@ that took its place. That node is found in one of two ways:
   example during a scale-out, KubeNeuron cannot tell which one replaced the
   node, and it does not guess.
 
-Until the cloud deletes the Node of the removed machine, which can take
-minutes, the incident's fault can still be reported for it: by its agent while
-the machine shuts down, by node health from the last condition on the Node, or
-by an alert rule that looks back over a window. While the Node read for such a
-report is still the removed machine's, by name and UID, the report is recorded
-in the audit trail as `replaced-node-signal` and does not fail the
-verification. A report from a new Node under the same name, for a Node that
-could not be read, or one that arrives after the Node is deleted still counts
-as the fault coming back.
+After the replacement removed the machine, the incident's fault can still be
+reported for it: by its agent while the machine shuts down, by node health from
+the last condition on its Node, or by an alert rule that looks back over a
+window, which can fire even after the cloud deleted the Node. While the Node
+read for such a report is still the removed machine's, by name and UID, the
+report is recorded in the audit trail as `replaced-node-signal` and does not
+fail the verification. A report that arrives after the cloud deleted the Node
+is recorded the same way, as long as no Node exists under that name. A report
+from a new Node under the same name, or for a Node that could not be read,
+still counts as the fault coming back. Where the replacement machine takes the
+name of the removed one, as can happen on GKE, an alert that still fires for
+the removed machine after the new Node has registered therefore counts as the
+fault coming back.
 
 The new node must be Ready and schedulable, and offer at least the
 accelerators the incident covered. When the incident recorded none, because

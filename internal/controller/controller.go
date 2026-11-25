@@ -807,41 +807,51 @@ func (c *Controller) ingestClaimedEvent(ctx context.Context, claimed *store.Clai
 // unnecessary has ended or removed its machine since.
 var errSignalNodeNotRead = errors.New("the signal's node was not read")
 
+// signalNode is what ingest read of a signal's Node before the transaction.
+type signalNode struct {
+	// read says the Node was read. Without the read, a decision that needs
+	// the Node stops the transaction.
+	read bool
+	// identity is the Node the read found, nil when it found none or failed.
+	identity *cloud.NodeIdentity
+	// deleted says the Kubernetes API answered that no Node of the name
+	// exists.
+	deleted bool
+}
+
 // ingestWithNode reads sig's Node when an incident needs it and runs ingestTx
 // in the transaction inTx starts. A transaction stopped for the Node runs
 // once more after the read; a Node that cannot be read then counts as it
 // always has.
 func (c *Controller) ingestWithNode(ctx context.Context, sig types.Signal, inTx func(func(store.Tx) error) error) (ingestOutcome, error) {
 	var outcome ingestOutcome
-	run := func(identity *cloud.NodeIdentity, read bool) error {
+	run := func(node signalNode) error {
 		if c.signalNodeRead != nil {
 			c.signalNodeRead()
 		}
 		return inTx(func(tx store.Tx) error {
 			var err error
-			outcome, err = c.ingestTx(ctx, tx, sig, identity, read)
+			outcome, err = c.ingestTx(ctx, tx, sig, node)
 			return err
 		})
 	}
-	identity, read := c.captureCloudIdentity(ctx, sig, false)
-	err := run(identity, read)
+	err := run(c.captureCloudIdentity(ctx, sig, false))
 	if errors.Is(err, errSignalNodeNotRead) {
-		identity, read = c.captureCloudIdentity(ctx, sig, true)
-		err = run(identity, read)
+		err = run(c.captureCloudIdentity(ctx, sig, true))
 	}
 	return outcome, err
 }
 
 // ingestTx performs the durable incident mutation for one signal. It does not
 // notify or update metrics: those effects happen only after the transaction
-// commits, so an outbox retry has no duplicated incident accounting. read
-// says whether ingest read sig's Node for identity; without the read, a
-// decision that needs the Node stops the transaction.
-func (c *Controller) ingestTx(ctx context.Context, tx store.Tx, sig types.Signal, identity *cloud.NodeIdentity, read bool) (ingestOutcome, error) {
+// commits, so an outbox retry has no duplicated incident accounting. node is
+// what ingest read of sig's Node; without the read, a decision that needs the
+// Node stops the transaction.
+func (c *Controller) ingestTx(ctx context.Context, tx store.Tx, sig types.Signal, node signalNode) (ingestOutcome, error) {
 	inc, err := tx.GetOpenIncident(ctx, sig.Target, sig.Class)
 	if errors.Is(err, store.ErrNotFound) && sig.Source == types.SourceAgentEvent && sig.Target.IsGPU() {
 		inc, err = tx.GetOpenIncident(ctx, types.Target{Node: sig.Target.Node}, sig.Class)
-		if err == nil && !fromRemovedMachine(inc, sig, identity) {
+		if err == nil && !fromRemovedMachine(inc, sig, node) {
 			if err := recordAgentDeviceJoin(ctx, tx, inc, sig); err != nil {
 				return ingestOutcome{}, err
 			}
@@ -849,26 +859,26 @@ func (c *Controller) ingestTx(ctx context.Context, tx store.Tx, sig types.Signal
 	}
 	switch {
 	case err == store.ErrNotFound:
-		if !read {
+		if !node.read {
 			return ingestOutcome{}, errSignalNodeNotRead
 		}
-		owner, err := replacingIncidentTx(ctx, tx, sig, identity)
+		owner, err := replacingIncidentTx(ctx, tx, sig, node)
 		if err != nil {
 			return ingestOutcome{}, err
 		}
 		if owner != nil {
-			return ingestOutcome{}, recordReplacedNodeSignal(ctx, tx, owner, sig, identity, false)
+			return ingestOutcome{}, recordReplacedNodeSignal(ctx, tx, owner, sig, node, false)
 		}
-		opened, err := c.openIncidentTx(ctx, tx, sig, identity)
+		opened, err := c.openIncidentTx(ctx, tx, sig, node.identity)
 		return ingestOutcome{opened: opened}, err
 	case err != nil:
 		return ingestOutcome{}, err
 	}
-	if !read && removedMachineDecides(inc, sig) {
+	if !node.read && removedMachineDecides(inc, sig) {
 		return ingestOutcome{}, errSignalNodeNotRead
 	}
-	if fromRemovedMachine(inc, sig, identity) {
-		return ingestOutcome{}, recordReplacedNodeSignal(ctx, tx, inc, sig, identity, true)
+	if fromRemovedMachine(inc, sig, node) {
+		return ingestOutcome{}, recordReplacedNodeSignal(ctx, tx, inc, sig, node, true)
 	}
 	var outcome ingestOutcome
 	if inc.Target.PCIAddr != "" && inc.Target.IsUnattributed() && sig.Target.IsGPU() {
@@ -1081,9 +1091,9 @@ func orNone(s string) string {
 // remain available during API outages; missing evidence leaves the incident
 // unpinned and therefore ineligible for cloud mutation. Later signals never
 // overwrite a pin or silently backfill a legacy incident after approval.
-// It returns the identity, nil without one, and whether the Node was read:
-// force reads it whatever the open incident needs.
-func (c *Controller) captureCloudIdentity(ctx context.Context, sig types.Signal, force bool) (*cloud.NodeIdentity, bool) {
+// It returns what it read of the Node, if it read it: force reads it whatever
+// the open incident needs.
+func (c *Controller) captureCloudIdentity(ctx context.Context, sig types.Signal, force bool) signalNode {
 	// Only a new incident needs a snapshot, and a signal of an incident that
 	// removed its machine: the snapshot says whether that machine sent it. The
 	// transaction checks again: a concurrent opener makes this read redundant,
@@ -1093,24 +1103,24 @@ func (c *Controller) captureCloudIdentity(ctx context.Context, sig types.Signal,
 	if !force {
 		if open, err := c.store.GetOpenIncident(ctx, sig.Target, sig.Class); err == nil {
 			if removedMachine(open) == nil {
-				return nil, false
+				return signalNode{}
 			}
 		} else if !errors.Is(err, store.ErrNotFound) {
-			return nil, false
+			return signalNode{}
 		}
 	}
 	observer, ok := c.platform.(platform.CloudNodeObserver)
 	if !ok {
-		return nil, true
+		return signalNode{read: true}
 	}
 	readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	ref, err := observer.CloudNode(readCtx, sig.Target.Node)
 	if err != nil {
-		return nil, true
+		return signalNode{read: true, deleted: errors.Is(err, platform.ErrNodeNotFound)}
 	}
 	if err := ref.Identity.Validate(); err != nil {
-		return nil, true
+		return signalNode{read: true}
 	}
-	return &ref.Identity, true
+	return signalNode{read: true, identity: &ref.Identity}
 }

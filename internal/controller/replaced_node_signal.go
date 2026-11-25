@@ -20,8 +20,10 @@ import (
 // instead of opening an incident of its own. The incident's own fault,
 // reported again from there, is not that fault coming back on the node that
 // took the machine's place either: it is recorded the same way and does not
-// fail the verification. Once that incident waits for a person or has ended,
-// the signal is taken as before.
+// fail the verification. An alert rule that looks back over a window goes on
+// reporting the machine after its Node is deleted; while no Node of the name
+// exists, that is recorded the same way. Once that incident waits for a
+// person or has ended, the signal is taken as before.
 const replacedNodeSignalAction = "replaced-node-signal"
 
 // replacingStates are the states of an incident automation is still working
@@ -65,21 +67,25 @@ func removedMachineDecides(inc *types.Incident, sig types.Signal) bool {
 }
 
 // fromRemovedMachine reports whether inc, still worked on, removed the
-// machine that sent sig: identity, read for sig before the transaction, is
-// still that machine's Node. A signal a person raised, or one for a node that
-// could not be read, never is.
-func fromRemovedMachine(inc *types.Incident, sig types.Signal, identity *cloud.NodeIdentity) bool {
-	if identity == nil || identity.NodeUID == "" || !removedMachineDecides(inc, sig) {
+// machine that sent sig: node, read for sig before the transaction, is still
+// that machine's Node, or no Node of its name exists any more. A signal a
+// person raised, or one for a node that could not be read, never is.
+func fromRemovedMachine(inc *types.Incident, sig types.Signal, node signalNode) bool {
+	if !removedMachineDecides(inc, sig) {
 		return false
 	}
 	removed := removedMachine(inc)
-	return removed.Node == identity.Node && removed.NodeUID == identity.NodeUID
+	if node.deleted {
+		return removed.Node == sig.Target.Node
+	}
+	return node.identity != nil && node.identity.NodeUID != "" &&
+		removed.Node == node.identity.Node && removed.NodeUID == node.identity.NodeUID
 }
 
 // replacingIncidentTx is the incident that removed the machine behind sig's
 // node, for a signal that names no incident of its own.
-func replacingIncidentTx(ctx context.Context, tx store.Tx, sig types.Signal, identity *cloud.NodeIdentity) (*types.Incident, error) {
-	if sig.Source == types.SourceManual || identity == nil || identity.NodeUID == "" {
+func replacingIncidentTx(ctx context.Context, tx store.Tx, sig types.Signal, node signalNode) (*types.Incident, error) {
+	if sig.Source == types.SourceManual || !node.deleted && (node.identity == nil || node.identity.NodeUID == "") {
 		return nil, nil
 	}
 	open, err := tx.ListIncidents(ctx, store.IncidentFilter{Node: sig.Target.Node, States: replacingStates})
@@ -87,7 +93,7 @@ func replacingIncidentTx(ctx context.Context, tx store.Tx, sig types.Signal, ide
 		return nil, err
 	}
 	for _, inc := range open {
-		if fromRemovedMachine(inc, sig, identity) {
+		if fromRemovedMachine(inc, sig, node) {
 			return inc, nil
 		}
 	}
@@ -100,10 +106,12 @@ func replacingIncidentTx(ctx context.Context, tx store.Tx, sig types.Signal, ide
 // changes: the incident's signal count, its last signal and its timestamps
 // stay as they are, so the signal neither delays nor fails its verification.
 // The signal_ params name the signal beside its evidence, whose own keys
-// (node health's gpu_uuid, for one) describe what the source observed.
-// recurrence is whether sig is inc's own fault, which would otherwise have
-// counted as the fault coming back.
-func recordReplacedNodeSignal(ctx context.Context, tx store.Tx, inc *types.Incident, sig types.Signal, identity *cloud.NodeIdentity, recurrence bool) error {
+// (node health's gpu_uuid, for one) describe what the source observed:
+// signal_node_uid is the UID of the Node read for sig, and signal_node is
+// deleted when none of the name existed any more. recurrence is whether sig
+// is inc's own fault, which would otherwise have counted as the fault coming
+// back.
+func recordReplacedNodeSignal(ctx context.Context, tx store.Tx, inc *types.Incident, sig types.Signal, node signalNode, recurrence bool) error {
 	trail, err := tx.AuditTrail(ctx, inc.ID)
 	if err != nil {
 		return err
@@ -121,16 +129,27 @@ func recordReplacedNodeSignal(ctx context.Context, tx store.Tx, inc *types.Incid
 	params["signal_class"] = string(sig.Class)
 	params["signal_source"] = string(sig.Source)
 	params["signal_severity"] = string(sig.Severity)
-	params["signal_node_uid"] = identity.NodeUID
+	if node.deleted {
+		params["signal_node"] = "deleted"
+	} else {
+		params["signal_node_uid"] = node.identity.NodeUID
+	}
 	if sig.Target.GPUUUID != "" {
 		params["signal_gpu_uuid"] = sig.Target.GPUUUID
 	}
 	if sig.Target.PCIAddr != "" {
 		params["signal_pci_addr"] = sig.Target.PCIAddr
 	}
-	result := fmt.Sprintf("%s was reported for %s after this incident removed its machine. It is recorded here and no separate incident was opened", sig.Class, sig.Target.Node)
-	if recurrence {
+	var result string
+	switch {
+	case node.deleted && recurrence:
+		result = fmt.Sprintf("%s was reported again for %s after this incident removed its machine and the cloud deleted its Node. It is recorded here and does not count as a recurrence", sig.Class, sig.Target.Node)
+	case node.deleted:
+		result = fmt.Sprintf("%s was reported for %s after this incident removed its machine and the cloud deleted its Node. It is recorded here and no separate incident was opened", sig.Class, sig.Target.Node)
+	case recurrence:
 		result = fmt.Sprintf("%s was reported again for %s after this incident removed its machine. It is recorded here and does not count as a recurrence", sig.Class, sig.Target.Node)
+	default:
+		result = fmt.Sprintf("%s was reported for %s after this incident removed its machine. It is recorded here and no separate incident was opened", sig.Class, sig.Target.Node)
 	}
 	return tx.AppendAudit(ctx, &types.AuditEntry{
 		IncidentID: inc.ID, Time: time.Now(), FromState: inc.State, ToState: inc.State,
