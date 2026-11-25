@@ -818,6 +818,13 @@ func (c *Controller) ingestTx(ctx context.Context, tx store.Tx, sig types.Signal
 	}
 	switch {
 	case err == store.ErrNotFound:
+		owner, err := replacingIncidentTx(ctx, tx, sig, identity)
+		if err != nil {
+			return ingestOutcome{}, err
+		}
+		if owner != nil {
+			return ingestOutcome{}, recordReplacedNodeSignal(ctx, tx, owner, sig, identity)
+		}
 		opened, err := c.openIncidentTx(ctx, tx, sig, identity)
 		return ingestOutcome{opened: opened}, err
 	case err != nil:

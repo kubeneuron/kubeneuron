@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 set -euo pipefail
-: "${CLUSTER_NAME:?}" "${KUBECONFIG:?}" "${AGENT_IMAGE:?}" "${API_URL:?}" "${API_HEADER:?}" "${EVIDENCE_DIR:?}"
+: "${CLUSTER_NAME:?}" "${KUBECONFIG:?}" "${AGENT_IMAGE:?}" "${API_URL:?}" "${API_HEADER:?}" "${WEBHOOK_HEADER:?}" "${EVIDENCE_DIR:?}"
 cd "$(dirname "$0")"
 mkdir -p "$EVIDENCE_DIR"
 k=(kubectl --context "kind-$CLUSTER_NAME")
@@ -45,6 +45,16 @@ remove_worker() {
 resolved() {
   wait_until audit_matches '.incident.state=="RESOLVED"'
   jq -e --arg node "$1" --arg correlation "$2" -f assert-resolution.jq "$audit"
+}
+# The machine behind node $1 is removed and its Node is not deleted yet: until
+# the cloud deletes it, which can take minutes, vmalert reports the agent down.
+# The alert, sent as vmalert does, is recorded on the incident that removed
+# the machine.
+removed_machine_alert() {
+  jq -nc --arg node "$1" '[{labels: {alertname: "KubeNeuronAgentDown", severity: "warning", job: "kubeneuron-agent", node: $node},
+    annotations: {summary: ("kubeneuron-agent down on " + $node)}, startsAt: (now | todate)}]' |
+    curl -fsS --max-time 5 -H "@$WEBHOOK_HEADER" -H 'Content-Type: application/json' -d @- "$API_URL/webhooks/vmalert/api/v2/alerts" >/dev/null
+  wait_until audit_matches 'any(.audit[]; .action=="replaced-node-signal" and .params.signal_class=="agent-down" and .params.alertname=="KubeNeuronAgentDown")'
 }
 policy_loaded() {
   digest=$("${k[@]}" -n rehearsal get cm rehearsal-runtime -o json |
@@ -91,6 +101,7 @@ case ${REPLACEMENT_PROVIDER:-aws} in
 esac
 ./join-worker.sh "$successor" "$successor_id"
 wait_until audit_matches 'any(.audit[];.action=="successor-replaced")'
+removed_machine_alert "$worker"
 remove_worker "$worker" "$INITIAL_ID"
 resolved "$successor" successor
 "${k[@]}" patch gpuremediationpolicy rehearsal-cloud-fell-off-bus --type merge -p '{"spec":{"replacement":{"strategy":"RemoveFirst"}}}'
@@ -121,10 +132,14 @@ else
     correlation=pool
   fi
 fi
+wait_until audit_matches '.incident.remove_first.phase=="done"'
+removed_machine_alert "$successor"
 remove_worker "$successor" "$successor_id"
 ./join-worker.sh "$final" "$final_id"
 wait_until report_ready "$final"
 resolved "$final" "$correlation"
+# Each replacement is one incident: neither alert opened one of its own.
+api incidents | jq -e 'all(.[]; .class != "agent-down")' >/dev/null
 if [[ ${REPLACEMENT_PROVIDER:-aws} == gke ]]; then
   final_uid=$("${k[@]}" get node "$final" -o jsonpath='{.metadata.uid}')
   test "$final_uid" != "$initial_uid"

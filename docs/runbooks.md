@@ -88,6 +88,12 @@ metrics path its series stopped arriving. The incident is `agent-down`
 no step runs, in any mode and whatever policy binds the class. Check the agent pod (`kubectl -n <ns> logs ds/<name>-agent`),
 its `/readyz`, and the mTLS material if it logs TLS errors.
 
+While KubeNeuron replaces a node, the alert also fires for the machine the
+replacement has already removed, until the cloud deletes its Node, which can
+take several minutes. That alert opens no incident: it is recorded, as
+`replaced-node-signal`, in the audit trail of the incident that replaced the
+node.
+
 ## Shadow-only GPU alerts (route to humans, never to the controller)
 
 Every `ShadowGpu*` rule in `configs/vmalert/gpu-shadow-rules.yaml` (deployed

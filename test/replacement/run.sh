@@ -21,7 +21,7 @@ pf=
 cleanup() {
   if [[ -n $pf ]]; then kill "$pf" 2>/dev/null || true; fi
   if [[ $created == 1 && ${KEEP_CLUSTER:-0} != 1 ]]; then kind delete cluster --name "$CLUSTER_NAME"; fi
-  rm -f "$work/header"
+  rm -f "$work/header" "$work/webhook-header"
 }
 trap cleanup EXIT
 docker build -f build/Dockerfile --target agent -t "$base" .
@@ -71,6 +71,8 @@ sed "s|POOL_LABEL|$POOL_LABEL|g" "$d/installation.json" | jq --argjson cloud "$C
 umask 077
 export API_HEADER="$work/header"
 { printf 'Authorization: Bearer '; "${k[@]}" -n rehearsal get secret rehearsal-operator-api-token -o jsonpath='{.data.token}' | openssl base64 -d -A; printf '\n'; } >"$API_HEADER"
+export WEBHOOK_HEADER="$work/webhook-header"
+{ printf 'Authorization: Bearer '; "${k[@]}" -n rehearsal get secret rehearsal-webhook-token -o jsonpath='{.data.token}' | openssl base64 -d -A; printf '\n'; } >"$WEBHOOK_HEADER"
 "${k[@]}" -n rehearsal port-forward svc/rehearsal-controller :8080 >"$work/forward" 2>&1 &
 pf=$!
 for ((i=0;i<50;i++)); do
