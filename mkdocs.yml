@@ -42,11 +42,12 @@ nav:
       - Accelerator health from Kubernetes nodes (experimental): accelerator-health.md
       - Alert runbooks: runbooks.md
       - Upgrades and rollback: upgrade.md
+      - Uninstall: uninstall.md
       - Troubleshooting: troubleshooting.md
   - Configuring:
       - Playbook authoring: playbook-authoring.md
       - XID catalog: xid-catalog.md
-  - Roadmap:
+  - Design records:
       - MIG semantics decision: mig-decision.md
       - Training reports: training-reports.md
       - Checkpoint coordination design: checkpoint-coordination-design.md
