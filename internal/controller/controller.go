@@ -165,6 +165,11 @@ type Controller struct {
 	checkpointNow  func() time.Time
 	checkpointPoll time.Duration
 
+	// signalNodeRead runs after ingest read a signal's Node, or skipped the
+	// read, and before the transaction that takes the signal. It is nil in
+	// production; tests change an incident in between.
+	signalNodeRead func()
+
 	// operations owns the durable product workflows.  It is nil only
 	// for legacy/out-of-tree stores that do not implement OperationalStore;
 	// their API surface fails closed instead of keeping workflow state in
@@ -775,13 +780,10 @@ func (c *Controller) ingest(ctx context.Context, sig types.Signal) error {
 	if c.observeOnlyNodeGone(ctx, sig) {
 		return nil
 	}
-	identity := c.captureCloudIdentity(ctx, sig)
-	var outcome ingestOutcome
-	if err := c.store.WithTx(ctx, func(tx store.Tx) error {
-		var err error
-		outcome, err = c.ingestTx(ctx, tx, sig, identity)
-		return err
-	}); err != nil {
+	outcome, err := c.ingestWithNode(ctx, sig, func(fn func(store.Tx) error) error {
+		return c.store.WithTx(ctx, fn)
+	})
+	if err != nil {
 		return err
 	}
 	return c.afterSignalCommitted(ctx, sig, outcome)
@@ -791,22 +793,51 @@ func (c *Controller) ingest(ctx context.Context, sig types.Signal) error {
 // incident/audit mutation. A crash can therefore leave either both changes
 // committed or neither; a reclaimed item can never increase SignalSeen twice.
 func (c *Controller) ingestClaimedEvent(ctx context.Context, claimed *store.ClaimedEvent, sig types.Signal) error {
-	identity := c.captureCloudIdentity(ctx, sig)
-	var outcome ingestOutcome
-	if err := c.eventOutbox.ProcessClaimedEvent(ctx, claimed.OutboxID, claimed.LeaseToken, func(tx store.Tx) error {
-		var err error
-		outcome, err = c.ingestTx(ctx, tx, sig, identity)
-		return err
-	}); err != nil {
+	outcome, err := c.ingestWithNode(ctx, sig, func(fn func(store.Tx) error) error {
+		return c.eventOutbox.ProcessClaimedEvent(ctx, claimed.OutboxID, claimed.LeaseToken, fn)
+	})
+	if err != nil {
 		return err
 	}
 	return c.afterSignalCommitted(ctx, sig, outcome)
 }
 
+// errSignalNodeNotRead stops a transaction that needs the Node of its signal
+// when ingest did not read it: the open incident that made the read
+// unnecessary has ended or removed its machine since.
+var errSignalNodeNotRead = errors.New("the signal's node was not read")
+
+// ingestWithNode reads sig's Node when an incident needs it and runs ingestTx
+// in the transaction inTx starts. A transaction stopped for the Node runs
+// once more after the read; a Node that cannot be read then counts as it
+// always has.
+func (c *Controller) ingestWithNode(ctx context.Context, sig types.Signal, inTx func(func(store.Tx) error) error) (ingestOutcome, error) {
+	var outcome ingestOutcome
+	run := func(identity *cloud.NodeIdentity, read bool) error {
+		if c.signalNodeRead != nil {
+			c.signalNodeRead()
+		}
+		return inTx(func(tx store.Tx) error {
+			var err error
+			outcome, err = c.ingestTx(ctx, tx, sig, identity, read)
+			return err
+		})
+	}
+	identity, read := c.captureCloudIdentity(ctx, sig, false)
+	err := run(identity, read)
+	if errors.Is(err, errSignalNodeNotRead) {
+		identity, read = c.captureCloudIdentity(ctx, sig, true)
+		err = run(identity, read)
+	}
+	return outcome, err
+}
+
 // ingestTx performs the durable incident mutation for one signal. It does not
 // notify or update metrics: those effects happen only after the transaction
-// commits, so an outbox retry has no duplicated incident accounting.
-func (c *Controller) ingestTx(ctx context.Context, tx store.Tx, sig types.Signal, identity *cloud.NodeIdentity) (ingestOutcome, error) {
+// commits, so an outbox retry has no duplicated incident accounting. read
+// says whether ingest read sig's Node for identity; without the read, a
+// decision that needs the Node stops the transaction.
+func (c *Controller) ingestTx(ctx context.Context, tx store.Tx, sig types.Signal, identity *cloud.NodeIdentity, read bool) (ingestOutcome, error) {
 	inc, err := tx.GetOpenIncident(ctx, sig.Target, sig.Class)
 	if errors.Is(err, store.ErrNotFound) && sig.Source == types.SourceAgentEvent && sig.Target.IsGPU() {
 		inc, err = tx.GetOpenIncident(ctx, types.Target{Node: sig.Target.Node}, sig.Class)
@@ -818,6 +849,9 @@ func (c *Controller) ingestTx(ctx context.Context, tx store.Tx, sig types.Signal
 	}
 	switch {
 	case err == store.ErrNotFound:
+		if !read {
+			return ingestOutcome{}, errSignalNodeNotRead
+		}
 		owner, err := replacingIncidentTx(ctx, tx, sig, identity)
 		if err != nil {
 			return ingestOutcome{}, err
@@ -829,6 +863,9 @@ func (c *Controller) ingestTx(ctx context.Context, tx store.Tx, sig types.Signal
 		return ingestOutcome{opened: opened}, err
 	case err != nil:
 		return ingestOutcome{}, err
+	}
+	if !read && removedMachineDecides(inc, sig) {
+		return ingestOutcome{}, errSignalNodeNotRead
 	}
 	if fromRemovedMachine(inc, sig, identity) {
 		return ingestOutcome{}, recordReplacedNodeSignal(ctx, tx, inc, sig, identity, true)
@@ -1044,31 +1081,36 @@ func orNone(s string) string {
 // remain available during API outages; missing evidence leaves the incident
 // unpinned and therefore ineligible for cloud mutation. Later signals never
 // overwrite a pin or silently backfill a legacy incident after approval.
-func (c *Controller) captureCloudIdentity(ctx context.Context, sig types.Signal) *cloud.NodeIdentity {
+// It returns the identity, nil without one, and whether the Node was read:
+// force reads it whatever the open incident needs.
+func (c *Controller) captureCloudIdentity(ctx context.Context, sig types.Signal, force bool) (*cloud.NodeIdentity, bool) {
 	// Only a new incident needs a snapshot, and a signal of an incident that
 	// removed its machine: the snapshot says whether that machine sent it. The
 	// transaction checks again: a concurrent opener makes this read redundant,
-	// while a concurrent closure can leave a new incident unpinned (safe
-	// refusal, never silent re-pinning).
-	if open, err := c.store.GetOpenIncident(ctx, sig.Target, sig.Class); err == nil {
-		if removedMachine(open) == nil {
-			return nil
+	// while an incident that ends or removes its machine before the
+	// transaction stops it, and the transaction runs again after a forced
+	// read (never silent re-pinning).
+	if !force {
+		if open, err := c.store.GetOpenIncident(ctx, sig.Target, sig.Class); err == nil {
+			if removedMachine(open) == nil {
+				return nil, false
+			}
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return nil, false
 		}
-	} else if !errors.Is(err, store.ErrNotFound) {
-		return nil
 	}
 	observer, ok := c.platform.(platform.CloudNodeObserver)
 	if !ok {
-		return nil
+		return nil, true
 	}
 	readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	ref, err := observer.CloudNode(readCtx, sig.Target.Node)
 	if err != nil {
-		return nil
+		return nil, true
 	}
 	if err := ref.Identity.Validate(); err != nil {
-		return nil
+		return nil, true
 	}
-	return &ref.Identity
+	return &ref.Identity, true
 }

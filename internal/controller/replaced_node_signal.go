@@ -57,16 +57,23 @@ func removedMachine(inc *types.Incident) *cloud.NodeIdentity {
 	return nil
 }
 
+// removedMachineDecides reports whether sig's Node decides how inc takes sig:
+// inc, still worked on, has removed a machine, and sig was not raised by a
+// person.
+func removedMachineDecides(inc *types.Incident, sig types.Signal) bool {
+	return sig.Source != types.SourceManual && slices.Contains(replacingStates, inc.State) && removedMachine(inc) != nil
+}
+
 // fromRemovedMachine reports whether inc, still worked on, removed the
 // machine that sent sig: identity, read for sig before the transaction, is
 // still that machine's Node. A signal a person raised, or one for a node that
 // could not be read, never is.
 func fromRemovedMachine(inc *types.Incident, sig types.Signal, identity *cloud.NodeIdentity) bool {
-	if sig.Source == types.SourceManual || identity == nil || identity.NodeUID == "" || !slices.Contains(replacingStates, inc.State) {
+	if identity == nil || identity.NodeUID == "" || !removedMachineDecides(inc, sig) {
 		return false
 	}
 	removed := removedMachine(inc)
-	return removed != nil && removed.Node == identity.Node && removed.NodeUID == identity.NodeUID
+	return removed.Node == identity.Node && removed.NodeUID == identity.NodeUID
 }
 
 // replacingIncidentTx is the incident that removed the machine behind sig's
