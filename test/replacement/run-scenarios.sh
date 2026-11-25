@@ -36,10 +36,13 @@ inject() {
   ./inject-xid.sh "$1" "$2"
   wait_until incident_opened "$1" "$2"
 }
-remove_worker() {
+remove_machine() {
   test "$("${k[@]}" get node "$1" -o jsonpath='{.spec.providerID}')" = "$2"
   test "$(docker inspect -f '{{index .Config.Labels "io.x-k8s.kind.cluster"}}' "$1")" = "$CLUSTER_NAME"
   docker rm -f "$1"
+}
+remove_worker() {
+  remove_machine "$1" "$2"
   "${k[@]}" delete node "$1"
 }
 resolved() {
@@ -55,6 +58,20 @@ removed_machine_alert() {
     annotations: {summary: ("kubeneuron-agent down on " + $node)}, startsAt: (now | todate)}]' |
     curl -fsS --max-time 5 -H "@$WEBHOOK_HEADER" -H 'Content-Type: application/json' -d @- "$API_URL/webhooks/vmalert/api/v2/alerts" >/dev/null
   wait_until audit_matches 'any(.audit[]; .action=="replaced-node-signal" and .params.signal_class=="agent-down" and .params.alertname=="KubeNeuronAgentDown")'
+}
+# The EKS node monitoring agent writes the injected fault on node $1 as a
+# condition. The Node keeps it after the machine is gone, fresh for ten
+# minutes after its last heartbeat, until the cloud deletes the Node.
+fault_condition() {
+  local now
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  "${k[@]}" patch node "$1" --subresource=status --type=strategic -p "$(jq -nc --arg now "$now" '{status: {conditions: [{type: "AcceleratedHardwareReady",
+    status: "False", reason: "NvidiaXID79Error", lastHeartbeatTime: $now, lastTransitionTime: $now}]}}')" >/dev/null
+}
+# Node health reads the condition again while the incident verifies the
+# replacement. The replacing incident records it, and it is no recurrence.
+removed_machine_fault() {
+  wait_until audit_matches 'any(.audit[]; .action=="replaced-node-signal" and .from_state=="VERIFYING" and .params.signal_source=="node-health" and .params.signal_class=="fell-off-bus")'
 }
 policy_loaded() {
   digest=$("${k[@]}" -n rehearsal get cm rehearsal-runtime -o json |
@@ -92,6 +109,7 @@ if [[ ${ZONE_SCENARIO:-} == SameZone ]]; then
   exit 0
 fi
 inject "$worker" 124c:3b:00
+fault_condition "$worker"
 wait_until audit_matches '(.incident.successor.provider_id | strings | length)>0 and any(.audit[];.action=="successor-created")'
 successor_id=$(jq -er '.incident.successor.provider_id' "$audit")
 case ${REPLACEMENT_PROVIDER:-aws} in
@@ -102,7 +120,9 @@ esac
 ./join-worker.sh "$successor" "$successor_id"
 wait_until audit_matches 'any(.audit[];.action=="successor-replaced")'
 removed_machine_alert "$worker"
-remove_worker "$worker" "$INITIAL_ID"
+remove_machine "$worker" "$INITIAL_ID"
+removed_machine_fault
+"${k[@]}" delete node "$worker"
 resolved "$successor" successor
 "${k[@]}" patch gpuremediationpolicy rehearsal-cloud-fell-off-bus --type merge -p '{"spec":{"replacement":{"strategy":"RemoveFirst"}}}'
 audit="$EVIDENCE_DIR/B.json"
@@ -114,6 +134,7 @@ if [[ -n ${RESTART_SCENARIO:-} ]]; then
   source ./restart-controller.sh
   exit 0
 fi
+fault_condition "$successor"
 if [[ ${REPLACEMENT_PROVIDER:-aws} == gke ]]; then
   wait_until audit_matches '.incident.remove_first.phase=="done" and .incident.remove_first.state.size=="1" and (.incident.remove_first.state.resize_diff|strings|length)>0 and any(.audit[];.action=="remove-first-planned")'
   final_id=$(jq -er '.incident.remove_first.state.resize_diff' "$audit")
@@ -134,7 +155,9 @@ else
 fi
 wait_until audit_matches '.incident.remove_first.phase=="done"'
 removed_machine_alert "$successor"
-remove_worker "$successor" "$successor_id"
+remove_machine "$successor" "$successor_id"
+removed_machine_fault
+"${k[@]}" delete node "$successor"
 ./join-worker.sh "$final" "$final_id"
 wait_until report_ready "$final"
 resolved "$final" "$correlation"

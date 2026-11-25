@@ -810,7 +810,7 @@ func (c *Controller) ingestTx(ctx context.Context, tx store.Tx, sig types.Signal
 	inc, err := tx.GetOpenIncident(ctx, sig.Target, sig.Class)
 	if errors.Is(err, store.ErrNotFound) && sig.Source == types.SourceAgentEvent && sig.Target.IsGPU() {
 		inc, err = tx.GetOpenIncident(ctx, types.Target{Node: sig.Target.Node}, sig.Class)
-		if err == nil {
+		if err == nil && !fromRemovedMachine(inc, sig, identity) {
 			if err := recordAgentDeviceJoin(ctx, tx, inc, sig); err != nil {
 				return ingestOutcome{}, err
 			}
@@ -823,12 +823,15 @@ func (c *Controller) ingestTx(ctx context.Context, tx store.Tx, sig types.Signal
 			return ingestOutcome{}, err
 		}
 		if owner != nil {
-			return ingestOutcome{}, recordReplacedNodeSignal(ctx, tx, owner, sig, identity)
+			return ingestOutcome{}, recordReplacedNodeSignal(ctx, tx, owner, sig, identity, false)
 		}
 		opened, err := c.openIncidentTx(ctx, tx, sig, identity)
 		return ingestOutcome{opened: opened}, err
 	case err != nil:
 		return ingestOutcome{}, err
+	}
+	if fromRemovedMachine(inc, sig, identity) {
+		return ingestOutcome{}, recordReplacedNodeSignal(ctx, tx, inc, sig, identity, true)
 	}
 	var outcome ingestOutcome
 	if inc.Target.PCIAddr != "" && inc.Target.IsUnattributed() && sig.Target.IsGPU() {
@@ -1042,10 +1045,16 @@ func orNone(s string) string {
 // unpinned and therefore ineligible for cloud mutation. Later signals never
 // overwrite a pin or silently backfill a legacy incident after approval.
 func (c *Controller) captureCloudIdentity(ctx context.Context, sig types.Signal) *cloud.NodeIdentity {
-	// Only a new incident needs a snapshot. The transaction checks again: a
-	// concurrent opener makes this read redundant, while a concurrent closure
-	// can leave a new incident unpinned (safe refusal, never silent re-pinning).
-	if _, err := c.store.GetOpenIncident(ctx, sig.Target, sig.Class); !errors.Is(err, store.ErrNotFound) {
+	// Only a new incident needs a snapshot, and a signal of an incident that
+	// removed its machine: the snapshot says whether that machine sent it. The
+	// transaction checks again: a concurrent opener makes this read redundant,
+	// while a concurrent closure can leave a new incident unpinned (safe
+	// refusal, never silent re-pinning).
+	if open, err := c.store.GetOpenIncident(ctx, sig.Target, sig.Class); err == nil {
+		if removedMachine(open) == nil {
+			return nil
+		}
+	} else if !errors.Is(err, store.ErrNotFound) {
 		return nil
 	}
 	observer, ok := c.platform.(platform.CloudNodeObserver)

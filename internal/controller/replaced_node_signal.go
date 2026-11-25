@@ -5,6 +5,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/store"
@@ -16,9 +17,11 @@ import (
 // its agent stops answering and its devices go, and the cloud deletes the
 // Node object only later. What it reports then is the removal, not a new
 // fault, so the signal is recorded on the incident that removed the machine
-// instead of opening an incident of its own. Once that incident waits for a
-// person or has ended, the next report of the signal opens an incident as
-// before.
+// instead of opening an incident of its own. The incident's own fault,
+// reported again from there, is not that fault coming back on the node that
+// took the machine's place either: it is recorded the same way and does not
+// fail the verification. Once that incident waits for a person or has ended,
+// the signal is taken as before.
 const replacedNodeSignalAction = "replaced-node-signal"
 
 // replacingStates are the states of an incident automation is still working
@@ -54,10 +57,20 @@ func removedMachine(inc *types.Incident) *cloud.NodeIdentity {
 	return nil
 }
 
+// fromRemovedMachine reports whether inc, still worked on, removed the
+// machine that sent sig: identity, read for sig before the transaction, is
+// still that machine's Node. A signal a person raised, or one for a node that
+// could not be read, never is.
+func fromRemovedMachine(inc *types.Incident, sig types.Signal, identity *cloud.NodeIdentity) bool {
+	if sig.Source == types.SourceManual || identity == nil || identity.NodeUID == "" || !slices.Contains(replacingStates, inc.State) {
+		return false
+	}
+	removed := removedMachine(inc)
+	return removed != nil && removed.Node == identity.Node && removed.NodeUID == identity.NodeUID
+}
+
 // replacingIncidentTx is the incident that removed the machine behind sig's
-// node, when identity, read for sig before the transaction, is still that
-// machine's Node. A signal a person raised, or one for a node that could not
-// be read, is never taken.
+// node, for a signal that names no incident of its own.
 func replacingIncidentTx(ctx context.Context, tx store.Tx, sig types.Signal, identity *cloud.NodeIdentity) (*types.Incident, error) {
 	if sig.Source == types.SourceManual || identity == nil || identity.NodeUID == "" {
 		return nil, nil
@@ -67,7 +80,7 @@ func replacingIncidentTx(ctx context.Context, tx store.Tx, sig types.Signal, ide
 		return nil, err
 	}
 	for _, inc := range open {
-		if removed := removedMachine(inc); removed != nil && removed.Node == identity.Node && removed.NodeUID == identity.NodeUID {
+		if fromRemovedMachine(inc, sig, identity) {
 			return inc, nil
 		}
 	}
@@ -81,7 +94,9 @@ func replacingIncidentTx(ctx context.Context, tx store.Tx, sig types.Signal, ide
 // stay as they are, so the signal neither delays nor fails its verification.
 // The signal_ params name the signal beside its evidence, whose own keys
 // (node health's gpu_uuid, for one) describe what the source observed.
-func recordReplacedNodeSignal(ctx context.Context, tx store.Tx, inc *types.Incident, sig types.Signal, identity *cloud.NodeIdentity) error {
+// recurrence is whether sig is inc's own fault, which would otherwise have
+// counted as the fault coming back.
+func recordReplacedNodeSignal(ctx context.Context, tx store.Tx, inc *types.Incident, sig types.Signal, identity *cloud.NodeIdentity, recurrence bool) error {
 	trail, err := tx.AuditTrail(ctx, inc.ID)
 	if err != nil {
 		return err
@@ -106,9 +121,13 @@ func recordReplacedNodeSignal(ctx context.Context, tx store.Tx, inc *types.Incid
 	if sig.Target.PCIAddr != "" {
 		params["signal_pci_addr"] = sig.Target.PCIAddr
 	}
+	result := fmt.Sprintf("%s was reported for %s after this incident removed its machine. It is recorded here and no separate incident was opened", sig.Class, sig.Target.Node)
+	if recurrence {
+		result = fmt.Sprintf("%s was reported again for %s after this incident removed its machine. It is recorded here and does not count as a recurrence", sig.Class, sig.Target.Node)
+	}
 	return tx.AppendAudit(ctx, &types.AuditEntry{
 		IncidentID: inc.ID, Time: time.Now(), FromState: inc.State, ToState: inc.State,
 		Actor: "system", Action: replacedNodeSignalAction, Params: params, DryRun: inc.DryRun,
-		Result: fmt.Sprintf("%s was reported for %s after this incident removed its machine. It is recorded here and no separate incident was opened", sig.Class, sig.Target.Node),
+		Result: result,
 	})
 }
