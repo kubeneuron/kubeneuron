@@ -133,7 +133,7 @@ ls -1 "$work"
 note "asset allow-list"
 sums="$work/checksums-${TAG}.txt"
 case "$TAG" in
-v1.0.0-rc.1 | v1.0.0-rc.2)
+v1.0.0-rc.1)
 	signature_assets=("$sums.sig" "$sums.pem")
 	blob_flags=(--signature "$sums.sig" --certificate "$sums.pem")
 	;;
