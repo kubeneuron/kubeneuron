@@ -1,7 +1,7 @@
 # Replacing GPU nodes on GKE
 
-**Experimental; start in DryRun.** Once, on a pre-release build: GKE Standard add-first replacement completed on a live cluster (fixed-size single-zone node pool, CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity; device health on the new node was not checked). Not repeated on v1.0.0-rc.1.
-Once, on a pre-release build: GKE Standard remove-first replacement on a fixed-size pool completed on a live cluster, with the pool's size restored (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity). Not repeated on v1.0.0-rc.1.
+**Experimental; start in DryRun.** Twice. Once on a pre-release build, and once on 25 November 2026, on images built from commit a398c516 — the code released as v1.0.0-rc.2 (the commits after it change only the changelog, the documentation and the navigation of the documentation site): GKE Standard add-first replacement completed on a live cluster (fixed-size single-zone node pool, CPU nodes; in the second run under an Automatic policy, without manual approvals; synthetic accelerator capacity; verification depth: node readiness and advertised capacity; no GPU was present and device health on the new node was not checked).
+Twice. Once on a pre-release build, and once on 25 November 2026, on images built from commit a398c516 — the code released as v1.0.0-rc.2 (the commits after it change only the changelog, the documentation and the navigation of the documentation site): GKE Standard remove-first replacement on a fixed-size pool completed on a live cluster, with the pool's size restored (in the second run under an Automatic policy, without manual approvals; CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity; no GPU was present and device health was not checked).
 Remove-first on autoscaled pools, multi-zone pools and Autopilot
 (observation-only) have been tested only against a simulated GKE and Compute
 Engine API. Nothing here is validated on accelerator hardware. Start in KubeNeuron's `DryRun` mode and move a narrow node
@@ -107,7 +107,7 @@ next attempt.
 
 ### Remove-first on a fixed-size pool
 
-Experimental. Once, on a pre-release build: GKE Standard remove-first replacement on a fixed-size pool completed on a live cluster, with the pool's size restored (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity). Not repeated on v1.0.0-rc.1. On a fixed-size
+Experimental. Twice. Once on a pre-release build, and once on 25 November 2026, on images built from commit a398c516 — the code released as v1.0.0-rc.2 (the commits after it change only the changelog, the documentation and the navigation of the documentation site): GKE Standard remove-first replacement on a fixed-size pool completed on a live cluster, with the pool's size restored (in the second run under an Automatic policy, without manual approvals; CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity; no GPU was present and device health was not checked). On a fixed-size
 pool, deleting a node's instance leaves the pool one node short until its
 size is set back, which takes a second call. KubeNeuron keeps a plan of the
 replacement on the incident, so a controller that stops between the two

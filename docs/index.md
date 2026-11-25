@@ -15,7 +15,7 @@ drain-and-reset → reboot → driver remediation → hardware escalation.
     supported but off by default: it must be confined by
     `spec.safety.destructiveExecution` (a non-empty node selector plus an
     exact acknowledgement), enforced at admission, compilation, controller
-    dispatch, and the agent executor. The EKS, AKS and GKE replacement paths each completed once on a live cluster with CPU nodes and synthetic accelerator capacity, on pre-release builds. None is validated on accelerator hardware; start in DryRun. See the [live cloud evidence table](reference-capabilities.md#live-cloud-evidence) for what was tested and how.
+    dispatch, and the agent executor. The EKS, AKS and GKE replacement paths each completed on a live cluster with CPU nodes and synthetic accelerator capacity. On accelerator hardware, only EKS was run: add-first and remove-first on a Tesla T4 node pool, with an injected fault on a healthy GPU. AKS and GKE are not validated on accelerator hardware; start in DryRun. See the [live cloud evidence table](reference-capabilities.md#live-cloud-evidence) for what was tested and how.
 
 ## Why KubeNeuron
 

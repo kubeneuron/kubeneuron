@@ -41,11 +41,18 @@ kubectl get clusterrole,clusterrolebinding,validatingwebhookconfiguration,mutati
 
 The remaining instructions apply to installations running v1.0.0-rc.1 or later.
 
-## Upgrading from v1.0.0-rc.2
+## Upgrading from v1.0.0-rc.1
 
 The controller becomes Ready after it normalizes stored timestamps. Startup time depends on the size of the store and how many timestamps need rewriting. If normalization does not finish, the controller logs a warning and starts anyway; it repeats the normalization on its next start.
 
-Back up the workflow store before upgrading. The node inventory migration adds
+Back up the workflow store before upgrading. The upgrade migrates the store
+from SQLite 0037, PostgreSQL 0028 to SQLite 0041, PostgreSQL 0032, and
+v1.0.0-rc.1 refuses the migrated store.
+
+The first migration (SQLite 0038, PostgreSQL 0029) stores when a signal last
+joined each incident; existing rows take their last update time.
+
+The node inventory migration adds
 `deleted_at` to existing records (SQLite 0039, PostgreSQL 0030). Existing rows
 start with a null timestamp. After its node cache has synced, the controller
 can mark a missing agent registration on a successful inventory sweep. Its
@@ -59,14 +66,7 @@ channels accepted the approval request of the current round. A round that is
 awaiting approval at the upgrade has no record yet, so each configured channel
 receives its approval request once more after the upgrade.
 
-To return to rc.2, stop writes and restore the pre-upgrade store backup before
-starting the rc.2 controller. It refuses databases with a newer schema.
-Restoring the backup also discards workflow changes made after the backup.
-A machine deleted after the backup stays deleted in the cloud, even if the
-restored store shows its removal as pending or has no record of it. Before
-restoring, let open replacements finish or pause remediation and check the
-outcome of any cloud calls already in flight. Compare each affected pool’s
-actual size with its planned size before resuming remediation.
+To return to rc.1, follow [From v1.0.0-rc.2 to v1.0.0-rc.1](#from-v100-rc2-to-v100-rc1).
 
 ## Before any upgrade
 
@@ -148,8 +148,9 @@ versions longer than a rolling upgrade needs.
 
 ### From v1.0.0-rc.2 to v1.0.0-rc.1
 
-Let active multi-zone add-first replacements finish, then follow these steps
-in order.
+Let active multi-zone add-first replacements finish, or pause remediation and
+check the outcome of any cloud calls already in flight, then follow these
+steps in order.
 
 1. Apply the rc.1 install manifest and wait for the rc.1 operator rollout
    to complete. This also restores the rc.1 CRDs.
@@ -161,15 +162,18 @@ in order.
 
 2. Set `spec.controller.image` and `spec.agent.image` on each root object to
    their rc.1 digests. The rc.1 controller refuses to start until the backup
-   is restored because the rc.2 schema (SQLite 0038 or PostgreSQL 0029) is
+   is restored because the rc.2 schema (SQLite 0041 or PostgreSQL 0032) is
    newer than it supports.
 3. Scale the operator to zero, then scale each controller to zero and wait
    for its pods to terminate. Restore the pre-upgrade backup for each
    workflow store. Restoring discards incidents and audit entries written
    since the backup was taken. Signals that the controller accepted after the
    backup are not in the restored store, and their senders do not send them
-   again. After the rollback, check the nodes and pools that had incidents
-   since the backup.
+   again. A machine deleted after the backup stays deleted in the cloud, even
+   if the restored store shows its removal as pending or has no record of it.
+   After the rollback, check the nodes and pools that had incidents since the
+   backup, and compare each affected pool’s actual size with its planned size
+   before resuming remediation.
 4. Restart the rc.1 operator. Verify the rc.1 controller and agent pods
    become Ready.
 
@@ -182,8 +186,16 @@ The rc.1 GPURemediationPolicy CRD also drops `spec.replacement.successorZone`.
 If a policy used `AnyPoolZone`, reapply it after upgrading again. Otherwise
 rc.2 uses `SameZone` for that policy.
 
-After the rollback, the Role `<name>-runtime-reader` added by rc.2 remains;
-it grants read access to one ConfigMap only and is deleted with the KubeNeuron object.
+After the rollback, two Roles added by rc.2 remain with their RoleBindings:
+`<name>-runtime-reader` grants read access to one ConfigMap, and
+`<name>-agent-auth-reader` grants list and watch on ServiceAccounts and
+DaemonSets in the installation namespace. Both are deleted with the KubeNeuron
+object. The rc.1 operator removes the controller's read access to persistent
+volume claims and persistent volumes from its ClusterRole.
+
+When you upgrade to rc.2 again after this rollback, the controller pauses
+automation because the restored store is older than the one it last used;
+check the incidents and run `kubeneuronctl resume`.
 
 Rolling back only the controller and agent images fails. The rc.2 operator
 passes `--nvidia-runtime-devices` to the agent. The rc.1 agent exits on

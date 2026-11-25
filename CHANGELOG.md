@@ -9,6 +9,8 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+## [v1.0.0-rc.2] - 2026-11-25
+
 ### Read before upgrading
 
 - Agent authentication no longer asks the Kubernetes API on every request. The
@@ -44,113 +46,30 @@ API is `v1alpha1`.
   `kubeneuron_agent_auth_live_gets_total`.
 - `install.sh --uninstall --delete-data` on the last installation now also empties the agent data directory `/var/lib/kube-neuron` on the nodes where this installation's agent Pods were running at the time of the uninstall, including the action journal and NVIDIA diagnostic bundles; it lists the nodes where this could not be confirmed. This cannot be undone: the action journal exists only on the node, so copy it first if you need the record.
 - Helm chart: `helm uninstall` now runs a check and stops when a KubeNeuron installation still exists; `--no-hooks` skips the check.
-- The workflow store is migrated (SQLite 0041, PostgreSQL 0032) to record
-  which notification channels accepted an approval request. Approval rounds
-  that are waiting for a decision at the upgrade are requested once more on
-  each configured channel.
-
-### Added
-
-- kubeneuronctl --ca-file (or KUBENEURONCTL_CA_FILE) trusts a private CA for the controller's certificate in addition to the system roots.
-
-- `kubeneuronctl status` shows the version of the controller that answered the request.
-
-- For multi-zone EKS and AKS pools using `AnyPoolZone`, `kubeneuronctl pools`
-  warns that a replacement may join another zone. The incident impact preview
-  reports how many pods have zone constraints from persistent volumes or
-  required scheduling rules. The resolution includes the counts when the
-  successor joins a different zone.
-- The controller now has cluster-wide `get` access to persistent volume
-  claims and persistent volumes to inspect zone affinity. It reads Kubernetes
-  object metadata and specs, without reading volume contents.
-- A remove-first replacement on a fixed-size AKS or GKE pool records each pool resize before it is sent. After a controller restart, an AKS resize is compared with the record and never sent again. A GKE resize not yet sent is sent after the restart only if the policy would start the replace step now, and is held while remediation is paused, the policy is in DryRun or the configuration is not loaded. If the step is interrupted after the node is removed (for example by a controller restart), under a policy in Approval mode the incident needs an operator at once, since no approval can be requested for a node that is already gone. The incident, `kubeneuronctl status` and `kubeneuronctl pools` show the pool's node count and what the resize waits for. After a restart, a replace step whose GKE plan already ended restored moves on without checking the deleted node again, and the node that joined the pool is verified as its replacement. A plan whose cloud operation cannot be read ends on the pool's final state and says so. On AKS, the `kubeneuron-replacing` tag is now also removed when the delete is confirmed after a restart, including while remediation is paused, and the incident's audit trail records it. An AKS resize that the cloud accepts and then fails for lack of capacity fails the step as before; the pool is handed to an operator only if it was left changed. When the controller does not repeat a recorded delete or resize, its log says once which check held it. Tested with simulated providers only.
-
-- After a controller restart, a remove-first replacement on EKS and AKS continues from the recorded target instead of stopping: the controller checks whether the original machine is gone and repeats the removal only for that machine. If an AKS machine with the same name cannot be confirmed as the original, the incident waits for the operator. Tested with simulated providers only.
-
-- A retained Kubernetes agent registration now exposes `deleted_at` when a
-  complete inventory observes its node missing. Recovery reports can still
-  use the recorded GPU inventory after the node disappears.
-
-### Changed
-
-- The restore guide now includes PostgreSQL restore steps and checks for automation pauses, approval rounds and node cordons after restoring either workflow store.
-
-- The description of the `KubeNeuronNotificationsDropped` alert, its runbook entry and the help text of `kubeneuron_notifications_dropped_total` no longer name a full queue as the only cause. They now say to check the `kind` label: `dead_letter` means delivery attempts failed, `event` or `approval_request` means the channel queue was full.
-
-- Notifications: the controller log lines for a failed delivery attempt, a dead-lettered notification or approval request, and a full queue now name the channel (`channel`), so with several channels the log says which channel it was.
-
-- `kubeneuronctl status` says when the CLI and the controller are different versions and links to the release of the controller's version. It compares only what the controller returned; the CLI contacts nothing else.
-
-- Panel: when an Approve or Reject arrives after the approval round was already decided, the panel now shows the recorded decision, who made it, through which channel and when, and offers to refresh the incident. The API answer for this case carries the decision in new `X-Approval-Actor`, `X-Approval-Channel` and `X-Approval-Decided-At` headers next to `X-Approval-Conflict` and `X-Approval-Decision`.
-
-- kubeneuronctl connection, authentication and TLS errors now say what to do next and print the underlying error on a separate cause: line. If you parse these error texts, update your parser.
-
-- Approval requests now say when they expire and what approving, rejecting or not deciding does, in Slack, webhook, PagerDuty, the panel and kubeneuronctl incidents show. Webhook and PagerDuty messages carry both the approve and the reject command. If an approval request expires after earlier steps already changed the node, the incident now waits for the operator instead of closing as expired. If you parse the text of these notifications, update your parser.
-
-- Agents now space out action polls when the queue is empty or the controller is unavailable, and stagger registration heartbeats. On an idle node, the agent now waits up to 15 seconds between polls (previously about 5 seconds), so a newly queued action is picked up later than before.
-- `install.sh --uninstall` now stops before removing anything when the operator is not installed and the stored data is to be kept, names the operator's namespace in its closing commands, and on the last installation removes the `karpenter.sh/do-not-disrupt` annotation that KubeNeuron itself had set.
-
-- install.sh --uninstall stops when an incident has a cloud replacement in progress (override with --skip-open-incident-check), turns back on the NVIDIA GPU Operator components that KubeNeuron had turned off on a node, and lists nodes that still have a KubeNeuron cordon or taint with the commands to remove them. Uninstall now needs jq, curl and openssl on the machine that runs it.
-
-- After the upgrade, a KubeNeuron cordon or degraded taint whose incident is no longer in the store is kept and reported to the operator instead of being removed. Check those nodes and remove the cordon or taint yourself.
-
-- New notice kind `store_older` when the controller pauses automation because the workflow store is older than the one it last used. The webhook payload has only `version`, `kind` and `message`, no `incident` object. PagerDuty receives a `critical` event with `dedup_key` `store-older` that is not resolved automatically.
-
-- New notice kind `node_kept` for a kept cordon or degraded taint. The webhook payload has no `incident` object, only `node` and, when recorded, `incident_id`. PagerDuty receives a `critical` event that is not resolved automatically. Consumers that expect an `incident` object in every notice need to handle it.
-
-- `kubeneuronctl incidents impact` lists the workloads on the node by namespace and name, the first 12 as in the panel, and shows the reasons workloads cannot checkpoint and the checkpoint groups as readable text. `--json` output, the digest and webhook notices are unchanged.
-
-- When automatic repair stops after repeated failures, an approval decision, or missing recovery evidence, the incident now tells the operator what to check and how to close it.
-
-- When an add-first replacement node is kept because it runs a workload or its removal cannot be confirmed, the incident names the pool, explains the possible extra charge and gives the command to record the outcome.
-
-- Replacement incidents use the cloud provider's error code to explain capacity failures and suggest an operator action. When the code does not distinguish capacity from quota, the incident asks the operator to check both. The classification follows provider documentation and has been tested with simulated errors. These failures have not been observed on live clusters.
-
-- After installation, use the printed port-forward and status commands. The status command reads the API token from the installation's Kubernetes Secret. The installer no longer prints the token value.
-
-- Release images and the checksum file use Cosign 3 Sigstore bundles. The installation guide includes verification commands for both the new format and the detached signatures used by rc.1 and rc.2.
-
-### Fixed
-
-- Backups: the scheduled-backup CronJob template did not work as shipped. It named the controller of an installation called `fleet` but the token Secret of the default installation, so it made no backup for either without further edits. Its defaults now match the installer's defaults; for another installation, one documented `sed` command sets the name and the namespace together. The CronJob and the restore helper now set the fields the Pod Security `restricted` profile requires. The CronJob also sets fsGroup, so on volume types that apply it the Job's non-root user can write to a newly provisioned backup volume.
-- Backups: an interrupted download in the scheduled-backup CronJob could leave a truncated file under a dated name, and retention counted it as a copy. The Job now downloads to a temporary name and keeps the copy only after checking its length against the response and against the SQLite header; otherwise the Job fails and the existing copies stay as they were. Retention counts only complete copies. An incomplete copy left by an earlier version of the template is reported in the Job log by name and is not removed. The download time limit and the number of retries are set in the template (`MAX_TIME`, `RETRIES`).
-
-- Notifications: an approval request that a notification channel did not accept, for example during a channel outage longer than the delivery retries, was not sent again, so the round could expire without a request reaching that channel. The controller now records which channels accepted the request of the current round and sends it again with growing pauses to a channel that has not, also after a restart, until the round is decided or expires. A channel can receive the same request more than once: when it accepted the request but answered with an error or not in time, or when the controller did not record the delivery before it stopped. Each request sent again to a channel is counted in `kubeneuron_approval_request_redeliveries_total` and logged as a warning.
-
-- PagerDuty: an alert summary that reaches the Events v2 length limit is now cut between characters, so it no longer ends in a broken character. The approve and reject commands stay complete in the alert's custom details.
-
-- Store: timestamps with different fractional-second precision were compared as text. Within the same second, a queued action could occasionally be picked before an older one, and time filters and retention cutoffs could misplace a record. Ordering and comparisons of the affected timestamps are now chronological. Existing values are rewritten to a fixed width once, when the controller first starts after the upgrade; the schema version does not change. Records of the operational audit log are not modified.
-
-- The KubeNeuron CRD now installs on Kubernetes 1.29, 1.30 and 1.31. Its validation rules for Secret references named the `namespace` field unescaped, which these versions refuse to compile, so the CRD was rejected there; the rules now write it as `__namespace__` and check the same thing.
-
-- install.sh --uninstall no longer suggests deleting the full install manifest. That command also deleted the kube-neuron namespace, with any volume claims the uninstall had just kept there, and all KubeNeuron CRDs and custom resources. The script now prints commands that remove only the operator.
-
-- The controller no longer removes a KubeNeuron cordon or degraded taint when its store has no record of the incident that placed it (after a reinstall with a new store, or after restoring an older backup). It keeps the cordon or taint and tells the operator once, naming the node and, when it is recorded, the incident.
-- When a GKE remove-first replacement needs an operator, the incident explains how to check the pool and settle the cloud operation. If the pool has been removed, the incident no longer suggests resizing it.
-- Add-first: a replacement node that KubeNeuron left in the pool — because it was already running a workload, or because its removal could not be confirmed — is no longer dropped from the incident's record when a later attempt plans its own replacement. The incident now waits for the operator and names the pool (and the node, when it was kept for a workload); `kubeneuronctl resolve <id> --cloud-operation-settled --reason "<what you found>"` then closes it. If the command is run while a later attempt is still in progress, it settles only the earlier node's record, and the incident stays open.
-
-- The pools API and `kubeneuronctl pools` explain why add-first is unavailable on a multi-zone GKE pool and advise using a single-zone pool or selecting RemoveFirst.
-- The optional AMD detection source reads `amd-smi metric --json` both as a
-  device array (ROCm 6.4 and earlier) and as the object with a `gpu_data`
-  array that amd-smi prints from ROCm 7.0. Before, the second form gave no
-  readings and the agent fell back to rocm-smi. Any other output is logged
-  as an unreadable amd-smi result, never read as zero devices. Not validated
-  on AMD hardware.
-- The optional AMD detection source reads only the amd-smi fields that the
-  amd-smi CLI prints. From amd-smi the agent reads the device list (PCI
-  address, UUID), ECC error counts and hotspot temperature. XGMI link errors,
-  retired pages and thermal throttling are not read from amd-smi in this
-  release. Not validated on AMD hardware. The PCI address and UUID come from
-  `amd-smi list --json`; if that fails, events still report and say that the
-  PCI address was not read. `--amd-xgmi-link-min-delta` and
-  `--amd-bad-page-threshold` stay accepted; with amd-smi they have no effect
-  in this release.
-
-## [v1.0.0-rc.2] - 2026-11-24
+- The workflow store is migrated from the v1.0.0-rc.1 schema (SQLite 0037,
+  PostgreSQL 0028) to SQLite 0041, PostgreSQL 0032. v1.0.0-rc.1 refuses the
+  migrated store; going back needs the pre-upgrade backup (see
+  `docs/upgrade.md`). One of the migrations records which notification
+  channels accepted an approval request: approval rounds that are waiting for
+  a decision at the upgrade are requested once more on each configured
+  channel.
+- The scheduled-backup CronJob template and the restore helper changed. The
+  CronJob runs as a non-root user with `fsGroup` set and downloads to a
+  temporary name before it keeps a copy. If you applied an edited copy of the
+  earlier template, apply the new one in its place; see Fixed.
+- Release signatures have a new format. From v1.0.0-rc.2 the checksum file
+  and the images are signed with Cosign 3 Sigstore bundles
+  (`checksums-<tag>.txt.sigstore.json`); verify them with Cosign 3.1.4 or
+  later as described in `docs/install.md`. v1.0.0-rc.1 keeps its detached
+  signature and certificate.
+- Integrations that read notices or command output: there is a new notice
+  kind `node_kept` whose webhook payload has no `incident` object, and the
+  texts of approval requests and of kubeneuronctl connection, authentication
+  and TLS errors changed. See Changed.
 
 ### Hardware evidence
 
-On Amazon EKS, in a node pool with real NVIDIA Tesla T4 GPUs, KubeNeuron replaced a node twice under an Automatic policy, with no manual approvals: add-first, then remove-first on the node that had replaced the first. Each fault was injected as an NVIDIA XID 79 line in the node's kernel log; the GPU itself was healthy. KubeNeuron verified each new node by readiness, advertised capacity and the device inventory its agent reported, and the driver answered; device health was not checked. Separately from KubeNeuron, the run checked the GPU on each new node with nvidia-smi (Tesla T4, driver 580.178.04) and the CUDA vectorAdd sample, which passed. This was done once, on build 30396cd34b576f7ac250deaeca7f3d43a2ab4638 — the code released as v1.0.0-rc.2 (the release commit changes only the changelog and the documentation).
+On Amazon EKS, in a node pool with real NVIDIA Tesla T4 GPUs, KubeNeuron replaced a node twice under an Automatic policy, with no manual approvals: add-first, then remove-first on the node that had replaced the first. Each fault was injected as an NVIDIA XID 79 line in the node's kernel log; the GPU itself was healthy. KubeNeuron verified each new node by readiness, advertised capacity and the device inventory its agent reported, and the driver answered; device health was not checked. Separately from KubeNeuron, the run checked the GPU on each new node with nvidia-smi (Tesla T4, driver 580.178.04) and the CUDA vectorAdd sample, which passed. This was done twice, on 25 November 2026, on images built from commit a398c51666e9cac28686c65eeb6c7c9260c7a0e0 — the code released as v1.0.0-rc.2 (the commits after it change only the changelog, the documentation and the navigation of the documentation site). In each run, two more incidents opened. In the second run, where they were recorded in full, both were agent-down observation incidents for the nodes that KubeNeuron was removing, raised by the KubeNeuronAgentDown alert after the node's agent stopped reporting: each sent an opened and a resolved notification, started no action, and was closed when the node was gone.
 
 ### Security
 
@@ -209,6 +128,26 @@ On Amazon EKS, in a node pool with real NVIDIA Tesla T4 GPUs, KubeNeuron replace
   going to an operator. Otherwise the node is found by the pool, as before.
   No new cloud permission or tag. Exercised with simulated providers only.
 
+- kubeneuronctl --ca-file (or KUBENEURONCTL_CA_FILE) trusts a private CA for the controller's certificate in addition to the system roots.
+
+- `kubeneuronctl status` shows the version of the controller that answered the request.
+
+- For multi-zone EKS and AKS pools using `AnyPoolZone`, `kubeneuronctl pools`
+  warns that a replacement may join another zone. The incident impact preview
+  reports how many pods have zone constraints from persistent volumes or
+  required scheduling rules. The resolution includes the counts when the
+  successor joins a different zone.
+- The controller now has cluster-wide `get` access to persistent volume
+  claims and persistent volumes to inspect zone affinity. It reads Kubernetes
+  object metadata and specs, without reading volume contents.
+- A remove-first replacement on a fixed-size AKS or GKE pool records each pool resize before it is sent. After a controller restart, an AKS resize is compared with the record and never sent again. A GKE resize not yet sent is sent after the restart only if the policy would start the replace step now, and is held while remediation is paused, the policy is in DryRun or the configuration is not loaded. If the step is interrupted after the node is removed (for example by a controller restart), under a policy in Approval mode the incident needs an operator at once, since no approval can be requested for a node that is already gone. The incident, `kubeneuronctl status` and `kubeneuronctl pools` show the pool's node count and what the resize waits for. After a restart, a replace step whose GKE plan already ended restored moves on without checking the deleted node again, and the node that joined the pool is verified as its replacement. A plan whose cloud operation cannot be read ends on the pool's final state and says so. On AKS, the `kubeneuron-replacing` tag is now also removed when the delete is confirmed after a restart, including while remediation is paused, and the incident's audit trail records it. An AKS resize that the cloud accepts and then fails for lack of capacity fails the step as before; the pool is handed to an operator only if it was left changed. When the controller does not repeat a recorded delete or resize, its log says once which check held it. Tested with simulated providers only.
+
+- After a controller restart, a remove-first replacement on EKS and AKS continues from the recorded target instead of stopping: the controller checks whether the original machine is gone and repeats the removal only for that machine. If an AKS machine with the same name cannot be confirmed as the original, the incident waits for the operator. Tested with simulated providers only.
+
+- A retained Kubernetes agent registration now exposes `deleted_at` when a
+  complete inventory observes its node missing. Recovery reports can still
+  use the recorded GPU inventory after the node disappears.
+
 ### Changed
 
 - When a reset playbook has no device ID, the incident now explains why the reset cannot run and asks the operator to check the device and resolve the incident. `kubeneuronctl incidents show` displays the reported vendor and PCI address when the GPU UUID is missing.
@@ -228,6 +167,43 @@ On Amazon EKS, in a node pool with real NVIDIA Tesla T4 GPUs, KubeNeuron replace
   `v1.0.0-rc.1` instead of skipping. On kind it upgrades both workflow stores
   to the new release, checks that rc.1 refuses the migrated store, restores
   the pre-upgrade snapshot and upgrades again.
+
+- The restore guide now includes PostgreSQL restore steps and checks for automation pauses, approval rounds and node cordons after restoring either workflow store.
+
+- The description of the `KubeNeuronNotificationsDropped` alert, its runbook entry and the help text of `kubeneuron_notifications_dropped_total` no longer name a full queue as the only cause. They now say to check the `kind` label: `dead_letter` means delivery attempts failed, `event` or `approval_request` means the channel queue was full.
+
+- Notifications: the controller log lines for a failed delivery attempt, a dead-lettered notification or approval request, and a full queue now name the channel (`channel`), so with several channels the log says which channel it was.
+
+- `kubeneuronctl status` says when the CLI and the controller are different versions and links to the release of the controller's version. It compares only what the controller returned; the CLI contacts nothing else.
+
+- Panel: when an Approve or Reject arrives after the approval round was already decided, the panel now shows the recorded decision, who made it, through which channel and when, and offers to refresh the incident. The API answer for this case carries the decision in new `X-Approval-Actor`, `X-Approval-Channel` and `X-Approval-Decided-At` headers next to `X-Approval-Conflict` and `X-Approval-Decision`.
+
+- kubeneuronctl connection, authentication and TLS errors now say what to do next and print the underlying error on a separate cause: line. If you parse these error texts, update your parser.
+
+- Approval requests now say when they expire and what approving, rejecting or not deciding does, in Slack, webhook, PagerDuty, the panel and kubeneuronctl incidents show. Webhook and PagerDuty messages carry both the approve and the reject command. If an approval request expires after earlier steps already changed the node, the incident now waits for the operator instead of closing as expired. If you parse the text of these notifications, update your parser.
+
+- Agents now space out action polls when the queue is empty or the controller is unavailable, and stagger registration heartbeats. On an idle node, the agent now waits up to 15 seconds between polls (previously about 5 seconds), so a newly queued action is picked up later than before.
+- `install.sh --uninstall` now stops before removing anything when the operator is not installed and the stored data is to be kept, names the operator's namespace in its closing commands, and on the last installation removes the `karpenter.sh/do-not-disrupt` annotation that KubeNeuron itself had set.
+
+- install.sh --uninstall stops when an incident has a cloud replacement in progress (override with --skip-open-incident-check), turns back on the NVIDIA GPU Operator components that KubeNeuron had turned off on a node, and lists nodes that still have a KubeNeuron cordon or taint with the commands to remove them. Uninstall now needs jq, curl and openssl on the machine that runs it.
+
+- After the upgrade, a KubeNeuron cordon or degraded taint whose incident is no longer in the store is kept and reported to the operator instead of being removed. Check those nodes and remove the cordon or taint yourself.
+
+- New notice kind `store_older` when the controller pauses automation because the workflow store is older than the one it last used. The webhook payload has only `version`, `kind` and `message`, no `incident` object. PagerDuty receives a `critical` event with `dedup_key` `store-older` that is not resolved automatically.
+
+- New notice kind `node_kept` for a kept cordon or degraded taint. The webhook payload has no `incident` object, only `node` and, when recorded, `incident_id`. PagerDuty receives a `critical` event that is not resolved automatically. Consumers that expect an `incident` object in every notice need to handle it.
+
+- `kubeneuronctl incidents impact` lists the workloads on the node by namespace and name, the first 12 as in the panel, and shows the reasons workloads cannot checkpoint and the checkpoint groups as readable text. `--json` output, the digest and webhook notices are unchanged.
+
+- When automatic repair stops after repeated failures, an approval decision, or missing recovery evidence, the incident now tells the operator what to check and how to close it.
+
+- When an add-first replacement node is kept because it runs a workload or its removal cannot be confirmed, the incident names the pool, explains the possible extra charge and gives the command to record the outcome.
+
+- Replacement incidents use the cloud provider's error code to explain capacity failures and suggest an operator action. When the code does not distinguish capacity from quota, the incident asks the operator to check both. The classification follows provider documentation and has been tested with simulated errors. These failures have not been observed on live clusters.
+
+- After installation, use the printed port-forward and status commands. The status command reads the API token from the installation's Kubernetes Secret. The installer no longer prints the token value.
+
+- Release images and the checksum file use Cosign 3 Sigstore bundles. The installation guide includes verification commands for both the new format and the detached signatures used by v1.0.0-rc.1.
 
 ### Fixed
 
@@ -364,6 +340,40 @@ On Amazon EKS, in a node pool with real NVIDIA Tesla T4 GPUs, KubeNeuron replace
 - An incident closed because its node is not in the cluster, and KubeNeuron
   had no record of the node when the incident opened, is audited as
   `node-unknown` instead of `node-replaced`.
+
+- Backups: the scheduled-backup CronJob template did not work as shipped. It named the controller of an installation called `fleet` but the token Secret of the default installation, so it made no backup for either without further edits. Its defaults now match the installer's defaults; for another installation, one documented `sed` command sets the name and the namespace together. The CronJob and the restore helper now set the fields the Pod Security `restricted` profile requires. The CronJob also sets fsGroup, so on volume types that apply it the Job's non-root user can write to a newly provisioned backup volume.
+- Backups: an interrupted download in the scheduled-backup CronJob could leave a truncated file under a dated name, and retention counted it as a copy. The Job now downloads to a temporary name and keeps the copy only after checking its length against the response and against the SQLite header; otherwise the Job fails and the existing copies stay as they were. Retention counts only complete copies. An incomplete copy left by an earlier version of the template is reported in the Job log by name and is not removed. The download time limit and the number of retries are set in the template (`MAX_TIME`, `RETRIES`).
+
+- Notifications: an approval request that a notification channel did not accept, for example during a channel outage longer than the delivery retries, was not sent again, so the round could expire without a request reaching that channel. The controller now records which channels accepted the request of the current round and sends it again with growing pauses to a channel that has not, also after a restart, until the round is decided or expires. A channel can receive the same request more than once: when it accepted the request but answered with an error or not in time, or when the controller did not record the delivery before it stopped. Each request sent again to a channel is counted in `kubeneuron_approval_request_redeliveries_total` and logged as a warning.
+
+- PagerDuty: an alert summary that reaches the Events v2 length limit is now cut between characters, so it no longer ends in a broken character. The approve and reject commands stay complete in the alert's custom details.
+
+- Store: timestamps with different fractional-second precision were compared as text. Within the same second, a queued action could occasionally be picked before an older one, and time filters and retention cutoffs could misplace a record. Ordering and comparisons of the affected timestamps are now chronological. Existing values are rewritten to a fixed width once, when the controller first starts after the upgrade; the schema version does not change. Records of the operational audit log are not modified.
+
+- The KubeNeuron CRD now installs on Kubernetes 1.29, 1.30 and 1.31. Its validation rules for Secret references named the `namespace` field unescaped, which these versions refuse to compile, so the CRD was rejected there; the rules now write it as `__namespace__` and check the same thing.
+
+- install.sh --uninstall no longer suggests deleting the full install manifest. That command also deleted the kube-neuron namespace, with any volume claims the uninstall had just kept there, and all KubeNeuron CRDs and custom resources. The script now prints commands that remove only the operator.
+
+- The controller no longer removes a KubeNeuron cordon or degraded taint when its store has no record of the incident that placed it (after a reinstall with a new store, or after restoring an older backup). It keeps the cordon or taint and tells the operator once, naming the node and, when it is recorded, the incident.
+- When a GKE remove-first replacement needs an operator, the incident explains how to check the pool and settle the cloud operation. If the pool has been removed, the incident no longer suggests resizing it.
+- Add-first: a replacement node that KubeNeuron left in the pool — because it was already running a workload, or because its removal could not be confirmed — is no longer dropped from the incident's record when a later attempt plans its own replacement. The incident now waits for the operator and names the pool (and the node, when it was kept for a workload); `kubeneuronctl resolve <id> --cloud-operation-settled --reason "<what you found>"` then closes it. If the command is run while a later attempt is still in progress, it settles only the earlier node's record, and the incident stays open.
+
+- The pools API and `kubeneuronctl pools` explain why add-first is unavailable on a multi-zone GKE pool and advise using a single-zone pool or selecting RemoveFirst.
+- The optional AMD detection source reads `amd-smi metric --json` both as a
+  device array (ROCm 6.4 and earlier) and as the object with a `gpu_data`
+  array that amd-smi prints from ROCm 7.0. Before, the second form gave no
+  readings and the agent fell back to rocm-smi. Any other output is logged
+  as an unreadable amd-smi result, never read as zero devices. Not validated
+  on AMD hardware.
+- The optional AMD detection source reads only the amd-smi fields that the
+  amd-smi CLI prints. From amd-smi the agent reads the device list (PCI
+  address, UUID), ECC error counts and hotspot temperature. XGMI link errors,
+  retired pages and thermal throttling are not read from amd-smi in this
+  release. Not validated on AMD hardware. The PCI address and UUID come from
+  `amd-smi list --json`; if that fails, events still report and say that the
+  PCI address was not read. `--amd-xgmi-link-min-delta` and
+  `--amd-bad-page-threshold` stay accepted; with amd-smi they have no effect
+  in this release.
 
 ## [v1.0.0-rc.1] - 2026-11-21
 

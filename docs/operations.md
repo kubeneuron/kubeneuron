@@ -576,6 +576,11 @@ download attempt in seconds and `RETRIES` sets how often a timeout or a 5xx is
 retried; keep `(RETRIES + 1) × MAX_TIME` under the Job's
 `activeDeadlineSeconds`.
 
+The backup endpoint has 30 seconds to make the copy and send it. While the
+copy is being made, other requests to the SQLite workflow store wait. If the
+scheduled Job starts to fail as the store grows, back up the volume with a
+VolumeSnapshot as described above.
+
 A fresh installer run selects the cloud recovery pack. See [Recovery policies](install.md#recovery-policies-installed-by-the-script) for ladder selection and the node-level alpha option.
 
 **Retention:** `deploy/install.sh --uninstall --name NAME --namespace NS`
@@ -609,7 +614,9 @@ event is older than `-store-audit-retention`; no pruning operation removes the
 middle of a retained hash chain. Audit rows and their incidents are append-only
 by default; budget roughly a few KB per incident step, or opt in to
 `-store-audit-retention` to prune *terminal* incidents with their audit and
-approval history after a window you choose.
+approval history after a window you choose. The operator does not yet expose
+this flag; in an operator-managed installation these records are kept until
+you delete the store.
 
 ## Remediation intelligence and autonomy
 
@@ -853,7 +860,10 @@ set.
 
 Connect to the controller API through its Kubernetes Service, not to a Pod
 directly. Only the elected leader is Ready, and a standby Pod answers most
-requests with HTTP 503.
+requests with HTTP 503. With this store the controller Deployment does not
+report Available and the Ready condition of the KubeNeuron object stays False
+(RuntimeUnavailable), although the installation works; check for one Ready
+controller Pod instead.
 
 KubeNeuron does **not** deploy or manage PostgreSQL. Use your platform's
 operator (CloudNativePG, RDS, …) and own its HA, backups, and PITR there:
@@ -1059,7 +1069,7 @@ exercised on real hardware.
 
 | Node image | GPUs visible to the agent without node-level actions |
 |---|---|
-| EKS Amazon Linux 2023 NVIDIA AMI | yes — observed once on the Amazon EKS-optimized Amazon Linux 2023 NVIDIA AMI (x86_64) with a Tesla T4 |
+| EKS Amazon Linux 2023 NVIDIA AMI | yes — observed on the Amazon EKS-optimized Amazon Linux 2023 NVIDIA AMI (x86_64) with a Tesla T4 |
 | AKS GPU node images | expected to work; not yet exercised on real hardware |
 | NVIDIA GPU Operator 25.10 or later, with CDI | with `spec.agent.runtimeClassName: nvidia` (see below); not yet exercised on real hardware. The NRI plugin's management devices and DRA admin access are not supported |
 | GKE Container-Optimized OS, with Google's device plugin | no: GPUs are given only to Pods that request them. Inventory needs host tooling with node-level actions, which runs the agent privileged; a GKE DRA setup is not supported |

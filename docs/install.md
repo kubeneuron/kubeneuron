@@ -330,7 +330,7 @@ kubectl -n kube-neuron get deployment kubeneuron-operator
     hack/verify-release.sh "$RELEASE_TAG"
     ```
 
-    For releases after v1.0.0-rc.2, the minimum supported verifier for both
+    For v1.0.0-rc.2 and later, the minimum supported verifier for both
     checksum bundles and image signatures is Cosign 3.1.4. The standard
     Cosign 2.5.2 image verification command does not find the new image
     signatures. To verify the signed
@@ -343,7 +343,7 @@ kubectl -n kube-neuron get deployment kubeneuron-operator
     cosign verify-blob --bundle "$sums.sigstore.json" --certificate-identity "$identity" --certificate-oidc-issuer "$issuer" "$sums"
     ```
 
-    For v1.0.0-rc.1 and v1.0.0-rc.2 use their original
+    For v1.0.0-rc.1 use its original
     detached signature and certificate. With the same variables, run:
 
     ```sh
