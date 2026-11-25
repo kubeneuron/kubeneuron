@@ -523,7 +523,10 @@ details. The same schema-version restriction applies to PostgreSQL.
 
 **Verify after either restore.** As soon as the controller is available, run
 `kubeneuronctl status`. The automation pause and cooldowns return to their
-state at backup time. If you still need automation paused, run
+state at backup time. If the restored copy was made through the backup
+endpoint, the controller has already paused automation and
+`kubeneuronctl status` says why. Check the pause after any restore,
+whichever way the copy was made. If you still need automation paused, run
 `kubeneuronctl pause` and confirm the pause in `status`.
 
 Allow one controller reconciliation pass, then run `kubeneuronctl incidents`
