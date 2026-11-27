@@ -690,7 +690,9 @@ from a new Node under the same name, or for a Node that could not be read,
 still counts as the fault coming back. Where the replacement machine takes the
 name of the removed one, as can happen on GKE, an alert that still fires for
 the removed machine after the new Node has registered therefore counts as the
-fault coming back.
+fault coming back. This does not cover a remove-first replacement on a GKE node
+pool under the cluster autoscaler yet: it keeps no record of the machine it
+deleted, so a report from that machine still counts as the fault coming back.
 
 The new node must be Ready and schedulable, and offer at least the
 accelerators the incident covered. When the incident recorded none, because

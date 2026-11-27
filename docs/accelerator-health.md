@@ -38,7 +38,9 @@ unrelated to the AWS Neuron SDK.
   present, or when the incident is verifying a recovery and the node still
   reports the fault: the verification then fails. After a replacement, a
   report from the Node of the removed machine is recorded on the incident as
-  `replaced-node-signal` instead, and the verification does not fail (see
+  `replaced-node-signal` instead, and the verification does not fail, except
+  after a remove-first replacement on a GKE node pool under the cluster
+  autoscaler (see
   [Verification after a replacement](playbook-authoring.md#verification-after-a-replacement)).
 - The incident records the profile, its version, the rule, the condition
   type, the condition's reason, and when the condition last changed. The

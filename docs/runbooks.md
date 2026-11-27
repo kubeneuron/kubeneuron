@@ -92,7 +92,8 @@ While KubeNeuron replaces a node, the alert also fires for the machine the
 replacement has already removed, until the cloud deletes its Node, which can
 take several minutes. That alert opens no incident: it is recorded, as
 `replaced-node-signal`, in the audit trail of the incident that replaced the
-node.
+node. This does not apply yet to a remove-first replacement on a GKE node pool
+under the cluster autoscaler, where the alert can still open its own incident.
 
 ## Shadow-only GPU alerts (route to humans, never to the controller)
 

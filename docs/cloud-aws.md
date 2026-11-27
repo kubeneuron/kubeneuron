@@ -3,8 +3,9 @@
 **Experimental.** Yes, once, on pre-release builds: EKS add-first replacement
 completed on a live cluster (CPU nodes, synthetic accelerator capacity;
 verification depth: node readiness and advertised capacity). The controller
-was updated during the incident. Not repeated on v1.0.0-rc.1. It is not
-validated on accelerator hardware. The live run used a single-zone group; add-first across zones (AnyPoolZone) was tested with simulated providers only.
+was updated during the incident. Not repeated on v1.0.0-rc.1. On accelerator
+hardware it was run on a Tesla T4 node pool, with an injected fault on a
+healthy GPU; see the [live cloud evidence table](reference-capabilities.md#live-cloud-evidence). The live run used a single-zone group; add-first across zones (AnyPoolZone) was tested with simulated providers only.
 
 When a replacement fails for lack of capacity, check the incident for the provider's reported cause and a suggested action. If the error code leaves capacity and quota ambiguous, check the account quota for the machine type, then the provider's status for the zone.
 

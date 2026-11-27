@@ -43,6 +43,11 @@ spec:
   privateKey:
     algorithm: ECDSA
     size: 256
+    # Keep the CA key when cert-manager renews this certificate (since v1.18
+    # it makes a new one by default), so leaves still verify against the copy
+    # in <name>-server-ca-bundle. Nothing updates that copy: replace it before
+    # the copied certificate expires, as README.md describes.
+    rotationPolicy: Never
   issuerRef:
     name: kubeneuron-selfsigned
     kind: Issuer
@@ -60,6 +65,7 @@ spec:
   privateKey:
     algorithm: ECDSA
     size: 256
+    rotationPolicy: Never # as for the server CA; the copy is <name>-client-ca-bundle
   issuerRef:
     name: kubeneuron-selfsigned
     kind: Issuer

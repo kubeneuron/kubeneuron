@@ -18,7 +18,7 @@ that the controller has loaded the published configuration.
 | Operator API | controller `-api-token-file` | `kubeneuronctl`, the web panel, vmagent `http_sd` |
 | Alertmanager webhook | controller `-webhook-token-file` | Alertmanager `http_config.authorization` |
 | Slack webhook URL | `spec.notifications.slack` Secret | controller notifier |
-| Generic webhook URL (+ optional bearer) | `spec.notifications.webhook` Secret (keys `url`, `token`) | controller notifier |
+| Generic webhook URL (bearer token not sent in this release) | `spec.notifications.webhook` Secret (keys `url`, `token`) | controller notifier |
 | PagerDuty routing key | `spec.notifications.pagerduty` Secret (key `routing-key`) | controller notifier (Events API v2) |
 
 Generate strong random tokens (`openssl rand -hex 32`) and reference their
@@ -50,7 +50,7 @@ kubeneuronctl --token "$(kubectl create token sre-bot -n ops)" ...
 
 **Rotation:** update the token Secret in place
 (`kubectl -n <ns> create secret generic <name> --from-literal=token="$(openssl rand -hex 32)" --dry-run=client -o yaml | kubectl apply -f -`).
-The kubelet refreshes the mounted file within about a minute and the
+The kubelet refreshes the mounted file within a minute or two and the
 controller re-reads it every 10 seconds — no restart. Rotate immediately
 if `kubeneuron_auth_failures_total` spikes. Repeated failed attempts from
 one source are throttled (20 failures/minute → `429`), and every failure
@@ -60,7 +60,7 @@ is logged with the source address.
 
 Every external channel (Slack, generic webhook, PagerDuty) runs behind its
 own asynchronous queue so an outage can never stall ingestion or the
-reconcile walk. Failed deliveries are retried 4 times with exponential
+reconcile walk. Failed deliveries are sent up to 4 times with exponential
 backoff (~21 s total); after the final failure the payload is
 **dead-lettered to the controller log** and
 `kubeneuron_notifications_dropped_total{kind="dead_letter"}` increments —
@@ -106,8 +106,11 @@ The generic webhook receives `POST` JSON
 A `node_kept` notice has no `incident` object; it carries
 `{"version":1,"kind":"node_kept","message","node","incident_id?"}`, with
 `incident_id` absent when the taint records no incident. A `store_older`
-notice carries only `{"version":1,"kind":"store_older","message"}`. The request has an
-optional `Authorization: Bearer` header from the Secret's `token` key.
+notice carries only `{"version":1,"kind":"store_older","message"}`. The Secret's `token` key is
+meant to be sent as an `Authorization: Bearer` header. In this release it is
+not sent, so a receiver that requires it rejects every notification, including
+approval requests. Restrict on the network who can reach the receiver, or use
+Slack or PagerDuty.
 For an approval request, the message includes the approve and reject commands for its round, the decision deadline when available, and the effect of rejecting the step. When the notification includes an impact digest, the approve command carries it. Consumers must ignore unknown fields.
 
 ## Pausing automation
@@ -576,6 +579,11 @@ download attempt in seconds and `RETRIES` sets how often a timeout or a 5xx is
 retried; keep `(RETRIES + 1) × MAX_TIME` under the Job's
 `activeDeadlineSeconds`.
 
+The backup endpoint has 30 seconds to make the copy and send it. While the
+copy is being made, other requests to the SQLite workflow store wait. If the
+scheduled Job starts to fail as the store grows, back up the volume with a
+VolumeSnapshot as described above.
+
 A fresh installer run selects the cloud recovery pack. See [Recovery policies](install.md#recovery-policies-installed-by-the-script) for ladder selection and the node-level alpha option.
 
 **Retention:** `deploy/install.sh --uninstall --name NAME --namespace NS`
@@ -609,7 +617,9 @@ event is older than `-store-audit-retention`; no pruning operation removes the
 middle of a retained hash chain. Audit rows and their incidents are append-only
 by default; budget roughly a few KB per incident step, or opt in to
 `-store-audit-retention` to prune *terminal* incidents with their audit and
-approval history after a window you choose.
+approval history after a window you choose. The operator does not yet expose
+this flag; in an operator-managed installation these records are kept until
+you delete the store.
 
 ## Remediation intelligence and autonomy
 
@@ -853,7 +863,10 @@ set.
 
 Connect to the controller API through its Kubernetes Service, not to a Pod
 directly. Only the elected leader is Ready, and a standby Pod answers most
-requests with HTTP 503.
+requests with HTTP 503. With this store the controller Deployment does not
+report Available and the Ready condition of the KubeNeuron object stays False
+(RuntimeUnavailable), although the installation works; check for one Ready
+controller Pod instead.
 
 KubeNeuron does **not** deploy or manage PostgreSQL. Use your platform's
 operator (CloudNativePG, RDS, …) and own its HA, backups, and PITR there:
@@ -1054,15 +1067,15 @@ adds no hostPath mount for GPU access. It reads the inventory only: without
 node-level actions it runs no action on the node. This needs the NVIDIA container runtime as the
 node's default runtime; a node whose runtime ignores these variables gives
 the agent no GPU, and the agent reports none and keeps watching the kernel
-log. Apart from the EKS image in the table below, this mode has not yet been
-exercised on real hardware.
+log. Apart from the EKS and AKS images in the table below, this mode has not yet
+been exercised on real hardware.
 
 | Node image | GPUs visible to the agent without node-level actions |
 |---|---|
-| EKS Amazon Linux 2023 NVIDIA AMI | yes — observed once on the Amazon EKS-optimized Amazon Linux 2023 NVIDIA AMI (x86_64) with a Tesla T4 |
-| AKS GPU node images | expected to work; not yet exercised on real hardware |
+| EKS Amazon Linux 2023 NVIDIA AMI | yes — observed on the Amazon EKS-optimized Amazon Linux 2023 NVIDIA AMI (x86_64) with a Tesla T4 |
+| AKS GPU node images | yes — observed once on AKS Ubuntu 24.04 nodes with the NVIDIA driver installed by AKS (Standard_NC4as_T4_v3, Tesla T4); other AKS GPU node images not yet exercised |
 | NVIDIA GPU Operator 25.10 or later, with CDI | with `spec.agent.runtimeClassName: nvidia` (see below); not yet exercised on real hardware. The NRI plugin's management devices and DRA admin access are not supported |
-| GKE Container-Optimized OS, with Google's device plugin | no: GPUs are given only to Pods that request them. Inventory needs host tooling with node-level actions, which runs the agent privileged; a GKE DRA setup is not supported |
+| GKE Container-Optimized OS, with Google's device plugin | no (observed once on GKE Container-Optimized OS with a Tesla T4): GPUs are given only to Pods that request them. Inventory needs host tooling with node-level actions, which runs the agent privileged; a GKE DRA setup is not supported |
 | Bottlerocket NVIDIA variants | no: the node setting `settings.nvidia-container-runtime.visible-devices-envvar-when-unprivileged`, false by default, makes the runtime ignore the request. Enabling it lets any unprivileged container that sets `NVIDIA_VISIBLE_DEVICES=all` see every GPU of the node; the alternative is host tooling with node-level actions |
 
 Platform behaviour as documented by each vendor in November 2026; check their current documentation.
@@ -1413,7 +1426,7 @@ pinned instance and checks it again before termination.
 Both replacement orders have completed on a live EKS cluster.
 Once, on a pre-release build: EKS remove-first replacement completed on a live cluster (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity). Not repeated on v1.0.0-rc.1.
 Once, on pre-release builds: EKS add-first replacement completed on a live cluster (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity). The controller was updated during the incident. Not repeated on v1.0.0-rc.1.
-Neither is validated on accelerator hardware. Start in KubeNeuron's `DryRun`
+On accelerator hardware, each was run once on a Tesla T4 node pool on images built from the v1.0.0-rc.2 code, with a fault reported by the test on a healthy GPU. Start in KubeNeuron's `DryRun`
 mode.
 
 The operator accepts AWS playbooks containing recycle or replace. At runtime,

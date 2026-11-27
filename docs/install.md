@@ -330,7 +330,7 @@ kubectl -n kube-neuron get deployment kubeneuron-operator
     hack/verify-release.sh "$RELEASE_TAG"
     ```
 
-    For releases after v1.0.0-rc.2, the minimum supported verifier for both
+    For v1.0.0-rc.2 and later, the minimum supported verifier for both
     checksum bundles and image signatures is Cosign 3.1.4. The standard
     Cosign 2.5.2 image verification command does not find the new image
     signatures. To verify the signed
@@ -343,7 +343,7 @@ kubectl -n kube-neuron get deployment kubeneuron-operator
     cosign verify-blob --bundle "$sums.sigstore.json" --certificate-identity "$identity" --certificate-oidc-issuer "$issuer" "$sums"
     ```
 
-    For v1.0.0-rc.1 and v1.0.0-rc.2 use their original
+    For v1.0.0-rc.1 use its original
     detached signature and certificate. With the same variables, run:
 
     ```sh
@@ -397,8 +397,9 @@ material once, as four Secrets:
 Create them in `spec.namespace` under the names referenced by `spec.tls`
 (key-pair Secrets as `kubernetes.io/tls`; CA bundles under `ca.crt` or a
 custom key). References must omit `namespace`. With bring-your-own
-material the operator only wires the volume mounts — it never reads,
-owns, or generates Secret data.
+material the operator wires the volume mounts and reads the Secrets, to
+warn before a certificate expires and to roll the workloads that mount one
+that changed. It never owns, changes or generates their data.
 
 !!! note "Rotation"
     Operator-issued material renews automatically, and renewal rolls
@@ -486,7 +487,9 @@ the fleet you intend.
 
 Add-first and remove-first replacement each completed once on a live EKS
 cluster with CPU nodes and synthetic accelerator capacity, on pre-release
-builds; neither is validated on accelerator hardware (see the
+builds. On accelerator hardware, each was run once on a Tesla T4 node pool on
+images built from the v1.0.0-rc.2 code, with a fault reported by the test on a
+healthy GPU (see the
 [live cloud evidence table](reference-capabilities.md#live-cloud-evidence)).
 Start in `DryRun` mode. Remove-first terminates the EC2 instance first, then
 its Auto Scaling group launches a successor. The default `AddFirst` strategy

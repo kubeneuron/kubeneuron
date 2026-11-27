@@ -1,10 +1,11 @@
 # Replacing GPU nodes on GKE
 
-**Experimental; start in DryRun.** Once, on a pre-release build: GKE Standard add-first replacement completed on a live cluster (fixed-size single-zone node pool, CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity; device health on the new node was not checked). Not repeated on v1.0.0-rc.1.
-Once, on a pre-release build: GKE Standard remove-first replacement on a fixed-size pool completed on a live cluster, with the pool's size restored (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity). Not repeated on v1.0.0-rc.1.
+**Experimental; start in DryRun.** Three times. Twice on pre-release builds, and once on 25 November 2026, on images built from commit 3fe83723 — the code released as v1.0.0-rc.2 (the commit after it changes only the changelog, the documentation and the cert-manager example manifest): GKE Standard add-first replacement completed on a live cluster (fixed-size single-zone node pool, CPU nodes; in the last two runs under an Automatic policy, without manual approvals; synthetic accelerator capacity; verification depth: node readiness and advertised capacity; no GPU was present and device health on the new node was not checked).
+Three times. Twice on pre-release builds, and once on 25 November 2026, on images built from commit 3fe83723 — the code released as v1.0.0-rc.2 (the commit after it changes only the changelog, the documentation and the cert-manager example manifest): GKE Standard remove-first replacement on a fixed-size pool completed on a live cluster, with the pool's size restored (in the last two runs under an Automatic policy, without manual approvals; CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity; no GPU was present and device health was not checked).
+On accelerator hardware, remove-first was run once, on 27 November 2026, on images built from the same commit: on a node with one Tesla T4 (n1-standard-4, Container-Optimized OS, NVIDIA driver and device plugin installed by GKE) it completed under an Automatic policy, without manual approvals. The test reported the fault as one XID 79 kernel-log line while the GPU was present. The agent saw no GPU on Container-Optimized OS, so the new node was verified by readiness and advertised capacity, and device health was not checked. Add-first was not run on accelerator hardware.
 Remove-first on autoscaled pools, multi-zone pools and Autopilot
 (observation-only) have been tested only against a simulated GKE and Compute
-Engine API. Nothing here is validated on accelerator hardware. Start in KubeNeuron's `DryRun` mode and move a narrow node
+Engine API. Apart from that one remove-first run on a Tesla T4, nothing here is validated on accelerator hardware. Start in KubeNeuron's `DryRun` mode and move a narrow node
 selector to live recovery only after you have watched it decide on your own
 cluster.
 
@@ -107,7 +108,7 @@ next attempt.
 
 ### Remove-first on a fixed-size pool
 
-Experimental. Once, on a pre-release build: GKE Standard remove-first replacement on a fixed-size pool completed on a live cluster, with the pool's size restored (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity). Not repeated on v1.0.0-rc.1. On a fixed-size
+Experimental. Three times. Twice on pre-release builds, and once on 25 November 2026, on images built from commit 3fe83723 — the code released as v1.0.0-rc.2 (the commit after it changes only the changelog, the documentation and the cert-manager example manifest): GKE Standard remove-first replacement on a fixed-size pool completed on a live cluster, with the pool's size restored (in the last two runs under an Automatic policy, without manual approvals; CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity; no GPU was present and device health was not checked). On a fixed-size
 pool, deleting a node's instance leaves the pool one node short until its
 size is set back, which takes a second call. KubeNeuron keeps a plan of the
 replacement on the incident, so a controller that stops between the two

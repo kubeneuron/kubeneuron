@@ -760,7 +760,7 @@ With these eligibility checks, both replacement orders have completed on a
 live EKS cluster.
 Once, on a pre-release build: EKS remove-first replacement completed on a live cluster (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity). Not repeated on v1.0.0-rc.1.
 Once, on pre-release builds: EKS add-first replacement completed on a live cluster (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity). The controller was updated during the incident. Not repeated on v1.0.0-rc.1.
-Neither is validated on accelerator hardware. Remove-first replacement calls
+On accelerator hardware, each was run once on a Tesla T4 node pool on images built from the v1.0.0-rc.2 code, with a fault reported by the test on a healthy GPU. Remove-first replacement calls
 `TerminateInstances` first, and the Auto Scaling group then launches a
 successor. Add-first raises the group's desired size first, on a single-zone
 group whose size is declared fixed (see [cloud-aws.md](cloud-aws.md)).
